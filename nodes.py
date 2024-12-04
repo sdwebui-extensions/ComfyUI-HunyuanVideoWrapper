@@ -344,14 +344,17 @@ class DownloadAndLoadHyVideoTextEncoder:
         if clip_model != "disabled":
             clip_model_path = os.path.join(folder_paths.models_dir, "clip", "clip-vit-large-patch14")
             if not os.path.exists(clip_model_path):
-                log.info(f"Downloading clip model to: {clip_model_path}")
-                from huggingface_hub import snapshot_download
-                snapshot_download(
-                    repo_id=clip_model,
-                    ignore_patterns=["*.msgpack", "*.bin", "*.h5"],
-                    local_dir=clip_model_path,
-                    local_dir_use_symlinks=False,
-                )
+                if os.path.exists('/stable-diffusion-cache/models/clip/clip-vit-large-patch14'):
+                    clip_model_path = '/stable-diffusion-cache/models/clip/clip-vit-large-patch14'
+                else:
+                    log.info(f"Downloading clip model to: {clip_model_path}")
+                    from huggingface_hub import snapshot_download
+                    snapshot_download(
+                        repo_id=clip_model,
+                        ignore_patterns=["*.msgpack", "*.bin", "*.h5"],
+                        local_dir=clip_model_path,
+                        local_dir_use_symlinks=False,
+                    )
 
             text_encoder_2 = TextEncoder(
             text_encoder_path=clip_model_path,
