@@ -395,6 +395,8 @@ class DownloadAndLoadHyVideoTextEncoder:
 
         download_path = os.path.join(folder_paths.models_dir,"LLM")
         base_path = os.path.join(download_path, (llm_model.split("/")[-1]))
+        if os.path.exists("/stable-diffusion-cache/models/LLM/llava-llama-3-8b-text-encoder-tokenizer"):
+            base_path = "/stable-diffusion-cache/models/LLM/llava-llama-3-8b-text-encoder-tokenizer"
         if not os.path.exists(base_path):
             log.info(f"Downloading model to: {base_path}")
             from huggingface_hub import snapshot_download
