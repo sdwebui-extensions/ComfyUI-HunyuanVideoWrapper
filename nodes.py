@@ -1,15 +1,11 @@
 import os
 import torch
 import json
-from einops import rearrange
-from contextlib import nullcontext
 from typing import List
-from pathlib import Path
 from .utils import log, check_diffusers_version, print_memory
 from diffusers.video_processor import VideoProcessor
 
-from .hyvideo.constants import PROMPT_TEMPLATE, NEGATIVE_PROMPT, PRECISION_TO_TYPE
-from .hyvideo.vae import load_vae
+from .hyvideo.constants import PROMPT_TEMPLATE
 from .hyvideo.text_encoder import TextEncoder
 from .hyvideo.utils.data_utils import align_to
 from .hyvideo.modules.posemb_layers import get_nd_rotary_pos_embed
@@ -101,14 +97,15 @@ class HyVideoModelLoader:
                 "model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
             
             "base_precision": (["fp16", "fp32", "bf16"], {"default": "bf16"}),
-            "quantization": (['disabled', 'fp8_e4m3fn', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6"], {"default": 'disabled', "tooltip": "optional quantization method"}),
+            "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6"], {"default": 'disabled', "tooltip": "optional quantization method"}),
             "load_device": (["main_device", "offload_device"], {"default": "main_device"}),
             },
             "optional": {
                 "attention_mode": ([
                     "sdpa",
-                    "flash_attn",
+                    "flash_attn_varlen",
                     "sageattn_varlen",
+                    "comfy",
                     ], {"default": "flash_attn"}),
                 "compile_args": ("COMPILEARGS", ),
                 "block_swap_args": ("BLOCKSWAPARGS", ),
@@ -121,7 +118,7 @@ class HyVideoModelLoader:
     CATEGORY = "HunyuanVideoWrapper"
 
     def loadmodel(self, model, base_precision, load_device,  quantization,
-                  compile_args=None, attention_mode="sdpa", enable_sequential_cpu_offload=False, block_swap_args=None):
+                  compile_args=None, attention_mode="sdpa", block_swap_args=None):
         transformer = None
         manual_offloading = True
         if "sage" in attention_mode:
@@ -164,7 +161,7 @@ class HyVideoModelLoader:
             )
 
         log.info("Using accelerate to load and assign model weights to device...")
-        if quantization == "fp8_e4m3fn":
+        if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast":
             dtype = torch.float8_e4m3fn
         else:
             dtype = base_dtype
@@ -173,14 +170,26 @@ class HyVideoModelLoader:
             dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else dtype
             set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=sd[name])
         transformer.eval()
+
+        if quantization == "fp8_e4m3fn_fast":
+            from .fp8_optimization import convert_fp8_linear
+            convert_fp8_linear(transformer, base_dtype, params_to_keep=params_to_keep)
         
         #compile
         if compile_args is not None:
             torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
-            for i, block in enumerate(transformer.single_blocks):
-                transformer.single_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-            for i, block in enumerate(transformer.double_blocks):
-                transformer.double_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+            if compile_args["compile_single_blocks"]:
+                for i, block in enumerate(transformer.single_blocks):
+                    transformer.single_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+            if compile_args["compile_double_blocks"]:
+                for i, block in enumerate(transformer.double_blocks):
+                    transformer.double_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+            if compile_args["compile_txt_in"]:
+                transformer.txt_in = torch.compile(transformer.txt_in, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+            if compile_args["compile_vector_in"]:
+                transformer.vector_in = torch.compile(transformer.vector_in, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+            if compile_args["compile_final_layer"]:
+                transformer.final_layer = torch.compile(transformer.final_layer, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
 
         if "torchao" in quantization:
             try:
@@ -213,7 +222,8 @@ class HyVideoModelLoader:
             
             manual_offloading = False # to disable manual .to(device) calls
             log.info(f"Quantized transformer blocks to {quantization}")
-            
+
+        
         scheduler = FlowMatchDiscreteScheduler(
             shift=9.0,
             reverse=True,
@@ -294,6 +304,12 @@ class HyVideoTorchCompileSettings:
                 "mode": (["default", "max-autotune", "max-autotune-no-cudagraphs", "reduce-overhead"], {"default": "default"}),
                 "dynamic": ("BOOLEAN", {"default": False, "tooltip": "Enable dynamic mode"}),
                 "dynamo_cache_size_limit": ("INT", {"default": 64, "min": 0, "max": 1024, "step": 1, "tooltip": "torch._dynamo.config.cache_size_limit"}),
+                "compile_single_blocks": ("BOOLEAN", {"default": True, "tooltip": "Compile single blocks"}),
+                "compile_double_blocks": ("BOOLEAN", {"default": True, "tooltip": "Compile double blocks"}),
+                "compile_txt_in": ("BOOLEAN", {"default": False, "tooltip": "Compile txt_in layers"}),
+                "compile_vector_in": ("BOOLEAN", {"default": False, "tooltip": "Compile vector_in layers"}),
+                "compile_final_layer": ("BOOLEAN", {"default": False, "tooltip": "Compile final layer"}),
+
             },
         }
     RETURN_TYPES = ("COMPILEARGS",)
@@ -302,7 +318,7 @@ class HyVideoTorchCompileSettings:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "torch.compile settings, when connected to the model loader, torch.compile of the selected layers is attempted. Requires Triton and torch 2.5.0 is recommended"
 
-    def loadmodel(self, backend, fullgraph, mode, dynamic, dynamo_cache_size_limit):
+    def loadmodel(self, backend, fullgraph, mode, dynamic, dynamo_cache_size_limit, compile_single_blocks, compile_double_blocks, compile_txt_in, compile_vector_in, compile_final_layer):
 
         compile_args = {
             "backend": backend,
@@ -310,6 +326,11 @@ class HyVideoTorchCompileSettings:
             "mode": mode,
             "dynamic": dynamic,
             "dynamo_cache_size_limit": dynamo_cache_size_limit,
+            "compile_single_blocks": compile_single_blocks,
+            "compile_double_blocks": compile_double_blocks,
+            "compile_txt_in": compile_txt_in,
+            "compile_vector_in": compile_vector_in,
+            "compile_final_layer": compile_final_layer
         }
 
         return (compile_args, )
@@ -328,6 +349,10 @@ class DownloadAndLoadHyVideoTextEncoder:
                     {"default": "bf16"}
                 ),
             },
+            "optional": {
+                "apply_final_norm": ("BOOLEAN", {"default": False}),
+                "hidden_state_skip_layer": ("INT", {"default": 2}),
+            }
         }
 
     RETURN_TYPES = ("HYVIDTEXTENCODER",)
@@ -336,7 +361,7 @@ class DownloadAndLoadHyVideoTextEncoder:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Loads Hunyuan text_encoder model from 'ComfyUI/models/LLM'"
 
-    def loadmodel(self, llm_model, clip_model, precision):
+    def loadmodel(self, llm_model, clip_model, precision, apply_final_norm=False, hidden_state_skip_layer=2, use_prompt_templates=True):
         
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -362,7 +387,6 @@ class DownloadAndLoadHyVideoTextEncoder:
             max_length=77,
             text_encoder_precision=precision,
             tokenizer_type="clipL",
-            reproduce=True,
             logger=log,
             device=device,
         )
@@ -396,9 +420,8 @@ class DownloadAndLoadHyVideoTextEncoder:
             tokenizer_type="llm",
             prompt_template=prompt_template,
             prompt_template_video=prompt_template_video,
-            hidden_state_skip_layer=2,
-            apply_final_norm=True,
-            reproduce=True,
+            hidden_state_skip_layer=hidden_state_skip_layer,
+            apply_final_norm=apply_final_norm,
             logger=log,
             device=device,
         )
@@ -417,10 +440,11 @@ class HyVideoTextEncode:
         return {"required": {
             "text_encoders": ("HYVIDTEXTENCODER",),
             "prompt": ("STRING", {"default": "", "multiline": True} ),
-            "negative_prompt": ("STRING", {"default": "", "multiline": True}),
+            #"negative_prompt": ("STRING", {"default": "", "multiline": True}),
             },
             "optional": {
                 "force_offload": ("BOOLEAN", {"default": True}),
+                 "use_prompt_templates": ("BOOLEAN", {"default": True, "tooltip": "Use the default prompt templates for the llm text encoder"}),
             }
         }
 
@@ -429,25 +453,30 @@ class HyVideoTextEncode:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, text_encoders, prompt, negative_prompt, force_offload=True):
+    def process(self, text_encoders, prompt, force_offload=True, use_prompt_templates=True):
         device = mm.text_encoder_device()
         offload_device = mm.text_encoder_offload_device()
 
         text_encoder_1 = text_encoders["text_encoder"]
         text_encoder_2 = text_encoders["text_encoder_2"]
 
+        negative_prompt = None
+
+        text_encoder_1.use_template = use_prompt_templates
+
         def encode_prompt(self, prompt, negative_prompt, text_encoder):
             batch_size = 1
             num_videos_per_prompt = 1
-            do_classifier_free_guidance = True
+            do_classifier_free_guidance = False
             data_type = "video"
-
+            
             text_inputs = text_encoder.text2tokens(prompt, data_type=data_type)
 
             prompt_outputs = text_encoder.encode(text_inputs, data_type=data_type, device=device)
             prompt_embeds = prompt_outputs.hidden_state
             
             attention_mask = prompt_outputs.attention_mask
+            print("prompt attention_mask: ", attention_mask.shape)
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
                 bs_embed, seq_len = attention_mask.shape
@@ -517,6 +546,9 @@ class HyVideoTextEncode:
                     negative_attention_mask = negative_attention_mask.view(
                         batch_size * num_videos_per_prompt, seq_len
                     )
+            else:
+                negative_prompt_embeds = None
+                negative_attention_mask = None
 
             if do_classifier_free_guidance:
                 # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
@@ -590,7 +622,7 @@ class HyVideoSampler:
                 "height": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 16}),
                 "num_frames": ("INT", {"default": 49, "min": 1, "max": 1024, "step": 4}),
                 "steps": ("INT", {"default": 30, "min": 1}),
-                "guidance_scale": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.01}),
+                "embedded_guidance_scale": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.01}),
                 "flow_shift": ("FLOAT", {"default": 9.0, "min": 0.0, "max": 30.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "force_offload": ("BOOLEAN", {"default": True}),
@@ -607,7 +639,7 @@ class HyVideoSampler:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, model, hyvid_embeds, flow_shift, steps, guidance_scale, seed, width, height, num_frames, samples=None, denoise_strength=1.0, force_offload=True):
+    def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, samples=None, denoise_strength=1.0, force_offload=True):
         mm.unload_all_models()
         mm.soft_empty_cache()
 
@@ -667,8 +699,8 @@ class HyVideoSampler:
             height = target_height,
             width = target_width,
             video_length = num_frames,
-            guidance_scale=guidance_scale,
-            embedded_guidance_scale=guidance_scale,
+            guidance_scale=1.0,
+            embedded_guidance_scale=embedded_guidance_scale,
             latents=samples["samples"] if samples is not None else None,
             denoise_strength=denoise_strength,
             prompt_embed_dict=hyvid_embeds,
@@ -863,6 +895,7 @@ NODE_CLASS_MAPPINGS = {
     "DownloadAndLoadHyVideoTextEncoder": DownloadAndLoadHyVideoTextEncoder,
     "HyVideoEncode": HyVideoEncode,
     "HyVideoBlockSwap": HyVideoBlockSwap,
+    "HyVideoTorchCompileSettings": HyVideoTorchCompileSettings,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -873,4 +906,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DownloadAndLoadHyVideoTextEncoder": "(Down)Load HunyuanVideo TextEncoder",
     "HyVideoEncode": "HunyuanVideo Encode",
     "HyVideoBlockSwap": "HunyuanVideo BlockSwap",
+    "HyVideoTorchCompileSettings": "HunyuanVideo Torch Compile Settings",
     }
