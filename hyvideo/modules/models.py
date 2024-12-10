@@ -36,7 +36,7 @@ class MMDoubleStreamBlock(nn.Module):
         qkv_bias: bool = False,
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
-        attention_mode: str = "flash_attn",
+        attention_mode: str = "sdpa",
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -199,9 +199,9 @@ class MMDoubleStreamBlock(nn.Module):
         q = torch.cat((img_q, txt_q), dim=1)
         k = torch.cat((img_k, txt_k), dim=1)
         v = torch.cat((img_v, txt_v), dim=1)
-        assert (
-            cu_seqlens_q.shape[0] == 2 * img.shape[0] + 1
-        ), f"cu_seqlens_q.shape:{cu_seqlens_q.shape}, img.shape[0]:{img.shape[0]}"
+        #assert (
+        #    cu_seqlens_q.shape[0] == 2 * img.shape[0] + 1
+        #), f"cu_seqlens_q.shape:{cu_seqlens_q.shape}, img.shape[0]:{img.shape[0]}"
         attn = attention(
             q,
             k,
@@ -262,7 +262,7 @@ class MMSingleStreamBlock(nn.Module):
         qk_scale: float = None,
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
-        attention_mode: str = "flash_attn",
+        attention_mode: str = "sdpa",
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -327,6 +327,7 @@ class MMSingleStreamBlock(nn.Module):
         max_seqlen_kv: Optional[int] = None,
         freqs_cis: Tuple[torch.Tensor, torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
+        stg_mode: Optional[str] = None,
     ) -> torch.Tensor:
         mod_shift, mod_scale, mod_gate = self.modulation(vec).chunk(3, dim=-1)
         x_mod = modulate(self.pre_norm(x), shift=mod_shift, scale=mod_scale)
@@ -353,26 +354,66 @@ class MMSingleStreamBlock(nn.Module):
             k = torch.cat((img_k, txt_k), dim=1)
 
         # Compute attention.
-        assert (
-            cu_seqlens_q.shape[0] == 2 * x.shape[0] + 1
-        ), f"cu_seqlens_q.shape:{cu_seqlens_q.shape}, x.shape[0]:{x.shape[0]}"
-        attn = attention(
-            q,
-            k,
-            v,
-            heads = self.heads_num,
-            mode=self.attention_mode,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=cu_seqlens_kv,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
-            batch_size=x.shape[0],
-            attn_mask=attn_mask
-        )
+        #assert (
+        #    cu_seqlens_q.shape[0] == 2 * x.shape[0] + 1
+        #), f"cu_seqlens_q.shape:{cu_seqlens_q.shape}, x.shape[0]:{x.shape[0]}"
+        if stg_mode is not None:
+            if stg_mode == "STG-A":
+                attn = attention(
+                    q,
+                    k,
+                    v,
+                    heads = self.heads_num,
+                    mode=self.attention_mode,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_kv=cu_seqlens_kv,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
+                    batch_size=x.shape[0],
+                    do_stg=True,
+                    txt_len=txt_len,
+                    attn_mask=attn_mask
+                )
+                output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+                return x + apply_gate(output, gate=mod_gate)
+            elif stg_mode == "STG-R":
+                attn = attention(
+                    q,
+                    k,
+                    v,
+                    heads = self.heads_num,
+                    mode=self.attention_mode,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_kv=cu_seqlens_kv,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
+                    batch_size=x.shape[0],
+                    attn_mask=attn_mask
+                )
+                # Compute activation in mlp stream, cat again and run second linear layer.
+                output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+                output = apply_gate(output, gate=mod_gate)
+                batch_size = output.shape[0]
+                output[:batch_size-1, :, :] = 0
+                return x + output
+        else:
+            attn = attention(
+                q,
+                k,
+                v,
+                heads = self.heads_num,
+                mode=self.attention_mode,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                batch_size=x.shape[0],
+                attn_mask=attn_mask
+            )
 
-        # Compute activation in mlp stream, cat again and run second linear layer.
-        output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
-        return x + apply_gate(output, gate=mod_gate)
+            # Compute activation in mlp stream, cat again and run second linear layer.
+            output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+            return x + apply_gate(output, gate=mod_gate)
 
 
 class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
@@ -452,7 +493,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         device: Optional[torch.device] = None,
         main_device: Optional[torch.device] = None,
         offload_device: Optional[torch.device] = None,
-        attention_mode: str = "flash_attn",
+        attention_mode: str = "sdpa",
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -466,6 +507,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
 
         self.main_device = main_device
         self.offload_device = offload_device
+        self.attention_mode = attention_mode
 
         # Text projection. Default to linear projection.
         # Alternative: TokenRefiner. See more details (LI-DiT): http://arxiv.org/abs/2406.11831
@@ -570,22 +612,30 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
             get_activation_layer("silu"),
             **factory_kwargs,
         )
-        self.double_blocks_to_swap = 0
-        self.single_blocks_to_swap = 0
+        self.double_blocks_to_swap = -1
+        self.single_blocks_to_swap = -1
+        self.offload_txt_in = False
+        self.offload_img_in = False
 
     # thanks @2kpr for the initial block swap code!
-    def block_swap(self, double_blocks_to_swap, single_blocks_to_swap):
-        print(f"Swapping {double_blocks_to_swap} double blocks and {single_blocks_to_swap} single blocks")
+    def block_swap(self, double_blocks_to_swap, single_blocks_to_swap, offload_txt_in=False, offload_img_in=False):
+        print(f"Swapping {double_blocks_to_swap + 1} double blocks and {single_blocks_to_swap + 1} single blocks")
         self.double_blocks_to_swap = double_blocks_to_swap
         self.single_blocks_to_swap = single_blocks_to_swap
+        self.offload_txt_in = offload_txt_in
+        self.offload_img_in = offload_img_in
         for b, block in enumerate(self.double_blocks):
-            if b < 0 or b > self.double_blocks_to_swap:
-                #mm.soft_empty_cache()
+            if b > self.double_blocks_to_swap:
+                #print(f"Moving double_block {b} to main device")
                 block.to(self.main_device)
+            else:
+                #print(f"Moving double_block {b} to offload_device")
+                block.to(self.offload_device)
         for b, block in enumerate(self.single_blocks):
-            if b < 0 or b > self.single_blocks_to_swap:
-                #mm.soft_empty_cache()
+            if b > self.single_blocks_to_swap:
                 block.to(self.main_device)
+            else:
+                block.to(self.offload_device)
 
     def enable_deterministic(self):
         for block in self.double_blocks:
@@ -609,6 +659,8 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         freqs_cos: Optional[torch.Tensor] = None,
         freqs_sin: Optional[torch.Tensor] = None,
         guidance: torch.Tensor = None,  # Guidance for modulation, should be cfg_scale x 1000.
+        stg_mode: str = None,
+        stg_block_idx: int = -1,
         return_dict: bool = True,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         out = {}
@@ -639,6 +691,11 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
             vec = vec + self.guidance_in(guidance)
 
         # Embed image and text.
+        if self.offload_txt_in:
+            self.txt_in.to(self.main_device)
+        if self.offload_img_in:
+            self.img_in.to(self.main_device)
+
         img = self.img_in(img)
         if self.text_projection == "linear":
             txt = self.txt_in(txt)
@@ -648,31 +705,37 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
             raise NotImplementedError(
                 f"Unsupported text_projection: {self.text_projection}"
             )
+        if self.offload_txt_in:
+            self.txt_in.to(self.offload_device, non_blocking=True)
+        if self.offload_img_in:
+            self.img_in.to(self.offload_device, non_blocking=True)
 
         txt_seq_len = txt.shape[1]
         img_seq_len = img.shape[1]
+        max_seqlen_q = max_seqlen_kv = img_seq_len + txt_seq_len
 
-        # Compute cu_squlens and max_seqlen for flash attention
-        cu_seqlens_q = get_cu_seqlens(text_mask, img_seq_len)
-        cu_seqlens_kv = cu_seqlens_q
-        max_seqlen_q = img_seq_len + txt_seq_len
-        max_seqlen_kv = max_seqlen_q
+        if self.attention_mode == "sdpa" or self.attention_mode == "comfy":
+            cu_seqlens_q, cu_seqlens_kv = None, None
+            # Create a square boolean mask filled with False
+            attn_mask = torch.zeros((1, max_seqlen_q, max_seqlen_q), dtype=torch.bool, device=text_mask.device)
 
-        # Create a square boolean mask filled with False
-        attn_mask = torch.zeros((1, max_seqlen_q, max_seqlen_q), dtype=torch.bool, device=text_mask.device)
+            # Calculate the valid attention regions
+            text_len = text_mask[0].sum().item()
+            total_len = text_len + img_seq_len
 
-        # Calculate the valid attention regions
-        text_len = text_mask[0].sum().item()
-        total_len = text_len + img_seq_len
-
-        # Allow attention to all tokens up to total_len
-        attn_mask[0, :total_len, :total_len] = True
+            # Allow attention to all tokens up to total_len
+            attn_mask[0, :total_len, :total_len] = True
+        else:
+            attn_mask = None
+            # Compute cu_squlens for flash attention
+            cu_seqlens_q = get_cu_seqlens(text_mask, img_seq_len)
+            cu_seqlens_kv = cu_seqlens_q
 
         freqs_cis = (freqs_cos, freqs_sin) if freqs_cos is not None else None
         # --------------------- Pass through DiT blocks ------------------------
         for b, block in enumerate(self.double_blocks):
-            if b >= 0 and b <= self.double_blocks_to_swap:
-                mm.soft_empty_cache()
+            if b <= self.double_blocks_to_swap and self.double_blocks_to_swap >= 0:
+                #print(f"Moving double_block {b} to main device")
                 block.to(self.main_device)
             double_block_args = [
                 img,
@@ -687,17 +750,19 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
             ]
 
             img, txt = block(*double_block_args)
-            if b >= 0 and b <= self.double_blocks_to_swap:
-                #mm.soft_empty_cache()
+            if b <= self.double_blocks_to_swap and self.double_blocks_to_swap >= 0:
+                #print(f"Moving double_block {b} to offload device")
                 block.to(self.offload_device, non_blocking=True)
 
         # Merge txt and img to pass through single stream blocks.
         x = torch.cat((img, txt), 1)
         if len(self.single_blocks) > 0:
             for b, block in enumerate(self.single_blocks):
-                if b >= 0 and b <= self.single_blocks_to_swap:
-                    mm.soft_empty_cache()
+                if b <= self.single_blocks_to_swap and self.single_blocks_to_swap >= 0:
+                    #print(f"Moving single_block {b} to main device")
+                    #mm.soft_empty_cache()
                     block.to(self.main_device)
+                curr_stg_mode = stg_mode if b == stg_block_idx else None
                 single_block_args = [
                     x,
                     vec,
@@ -707,11 +772,13 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                     max_seqlen_q,
                     max_seqlen_kv,
                     (freqs_cos, freqs_sin),
-                    attn_mask
+                    attn_mask,
+                    curr_stg_mode,
                 ]
 
                 x = block(*single_block_args)
-                if b >= 0 and b <= self.single_blocks_to_swap:
+                if b <= self.single_blocks_to_swap and self.single_blocks_to_swap >= 0:
+                    #print(f"Moving single_block {b} to offload device")
                     #mm.soft_empty_cache()
                     block.to(self.offload_device, non_blocking=True)
 

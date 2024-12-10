@@ -2,6 +2,7 @@ import os
 import torch
 import json
 from typing import List
+import gc
 from .utils import log, check_diffusers_version, print_memory
 from diffusers.video_processor import VideoProcessor
 
@@ -77,6 +78,8 @@ class HyVideoBlockSwap:
             "required": { 
                 "double_blocks_to_swap": ("INT", {"default": 20, "min": 0, "max": 20, "step": 1, "tooltip": "Number of double blocks to swap"}),
                 "single_blocks_to_swap": ("INT", {"default": 0, "min": 0, "max": 40, "step": 1, "tooltip": "Number of single blocks to swap"}),
+                "offload_txt_in": ("BOOLEAN", {"default": False, "tooltip": "Offload txt_in layer"}),
+                "offload_img_in": ("BOOLEAN", {"default": False, "tooltip": "Offload img_in layer"}),
             },
         }
     RETURN_TYPES = ("BLOCKSWAPARGS",)
@@ -87,7 +90,28 @@ class HyVideoBlockSwap:
 
     def setargs(self, **kwargs):
         return (kwargs, )
-    
+
+class HyVideoSTG:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": { 
+                "stg_mode": (["STG-A", "STG-R"],),
+                "stg_block_idx": ("INT", {"default": 0, "min": -1, "max": 39, "step": 1, "tooltip": "Block index to apply STG"}),
+                "stg_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Recommended values are ≤2.0"}),
+                "stg_start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percentage of the steps to apply STG"}),
+                "stg_end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percentage of the steps to apply STG"}),
+            },
+        }
+    RETURN_TYPES = ("STGARGS",)
+    RETURN_NAMES = ("stg_args",)
+    FUNCTION = "setargs"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "Spatio Temporal Guidance, https://github.com/junhahyung/STGuidance"
+
+    def setargs(self, **kwargs):
+        return (kwargs, )
+
 #region Model loading
 class HyVideoModelLoader:
     @classmethod
@@ -97,7 +121,7 @@ class HyVideoModelLoader:
                 "model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
             
             "base_precision": (["fp16", "fp32", "bf16"], {"default": "bf16"}),
-            "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6"], {"default": 'disabled', "tooltip": "optional quantization method"}),
+            "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6", "torchao_int4", "torchao_int8"], {"default": 'disabled', "tooltip": "optional quantization method"}),
             "load_device": (["main_device", "offload_device"], {"default": "main_device"}),
             },
             "optional": {
@@ -136,7 +160,7 @@ class HyVideoModelLoader:
         base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[base_precision]
 
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
-        sd = load_torch_file(model_path, device=transformer_load_device)
+        sd = load_torch_file(model_path, device=offload_device)
 
         in_channels = out_channels = 16
         factor_kwargs = {"device": transformer_load_device, "dtype": base_dtype}
@@ -159,45 +183,16 @@ class HyVideoModelLoader:
                 **HUNYUAN_VIDEO_CONFIG,
                 **factor_kwargs
             )
-
-        log.info("Using accelerate to load and assign model weights to device...")
-        if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast":
-            dtype = torch.float8_e4m3fn
-        else:
-            dtype = base_dtype
-        params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
-        for name, param in transformer.named_parameters():
-            dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else dtype
-            set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=sd[name])
         transformer.eval()
-
-        if quantization == "fp8_e4m3fn_fast":
-            from .fp8_optimization import convert_fp8_linear
-            convert_fp8_linear(transformer, base_dtype, params_to_keep=params_to_keep)
-        
-        #compile
-        if compile_args is not None:
-            torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
-            if compile_args["compile_single_blocks"]:
-                for i, block in enumerate(transformer.single_blocks):
-                    transformer.single_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-            if compile_args["compile_double_blocks"]:
-                for i, block in enumerate(transformer.double_blocks):
-                    transformer.double_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-            if compile_args["compile_txt_in"]:
-                transformer.txt_in = torch.compile(transformer.txt_in, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-            if compile_args["compile_vector_in"]:
-                transformer.vector_in = torch.compile(transformer.vector_in, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-            if compile_args["compile_final_layer"]:
-                transformer.final_layer = torch.compile(transformer.final_layer, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-
         if "torchao" in quantization:
             try:
                 from torchao.quantization import (
                 quantize_,
                 fpx_weight_only,
                 float8_dynamic_activation_float8_weight,
-                int8_dynamic_activation_int8_weight
+                int8_dynamic_activation_int8_weight,
+                int8_weight_only,
+                int4_weight_only
             )
             except:
                 raise ImportError("torchao is not installed, please install torchao to use fp8dq")
@@ -208,22 +203,84 @@ class HyVideoModelLoader:
             #         return isinstance(module, nn.Linear)
             #     return False
             
-            if "fp6" in quantization: #slower for some reason on 4090
+            if "fp6" in quantization:
                 quant_func = fpx_weight_only(3, 2)
-            elif "fp8dq" in quantization: #very fast on 4090 when compiled
+            elif "int4" in quantization:
+                quant_func = int4_weight_only()
+            elif "int8" in quantization:
+                quant_func = int8_weight_only()
+            elif "fp8dq" in quantization:
                 quant_func = float8_dynamic_activation_float8_weight()
             elif 'fp8dqrow' in quantization:
                 from torchao.quantization.quant_api import PerRow
                 quant_func = float8_dynamic_activation_float8_weight(granularity=PerRow())
             elif 'int8dq' in quantization:
                 quant_func = int8_dynamic_activation_int8_weight()
-        
-            quantize_(transformer, quant_func)
+
+            log.info(f"Quantizing model with {quant_func}")
+
+            for i, block in enumerate(transformer.single_blocks):
+                log.info(f"Quantizing single_block {i}")
+                for name, _ in block.named_parameters(prefix=f"single_blocks.{i}"):
+                    #print(f"Parameter name: {name}")
+                    set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=base_dtype, value=sd[name])
+                if compile_args is not None:
+                    transformer.single_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+                quantize_(block, quant_func)
+                print(block)
+                block.to(offload_device)
+            for i, block in enumerate(transformer.double_blocks):
+                log.info(f"Quantizing double_block {i}")
+                for name, _ in block.named_parameters(prefix=f"double_blocks.{i}"):
+                    #print(f"Parameter name: {name}")
+                    set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=base_dtype, value=sd[name])
+                if compile_args is not None:
+                    transformer.double_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+                quantize_(block, quant_func)
+            for name, param in transformer.named_parameters():
+                if "single_blocks" not in name and "double_blocks" not in name:
+                    set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=base_dtype, value=sd[name])
             
             manual_offloading = False # to disable manual .to(device) calls
             log.info(f"Quantized transformer blocks to {quantization}")
+            for name, param in transformer.named_parameters():
+                print(name, param.dtype)
+                #param.data = param.data.to(self.vae_dtype).to(device)
+        else:
+            log.info("Using accelerate to load and assign model weights to device...")
+            if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast":
+                dtype = torch.float8_e4m3fn
+            else:
+                dtype = base_dtype
+            params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
+            for name, param in transformer.named_parameters():
+                dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else dtype
+                set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=sd[name])
+            
 
-        
+            if quantization == "fp8_e4m3fn_fast":
+                from .fp8_optimization import convert_fp8_linear
+                convert_fp8_linear(transformer, base_dtype, params_to_keep=params_to_keep)
+            
+            #compile
+            if compile_args is not None:
+                torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
+                if compile_args["compile_single_blocks"]:
+                    for i, block in enumerate(transformer.single_blocks):
+                        transformer.single_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+                if compile_args["compile_double_blocks"]:
+                    for i, block in enumerate(transformer.double_blocks):
+                        transformer.double_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+                if compile_args["compile_txt_in"]:
+                    transformer.txt_in = torch.compile(transformer.txt_in, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+                if compile_args["compile_vector_in"]:
+                    transformer.vector_in = torch.compile(transformer.vector_in, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+                if compile_args["compile_final_layer"]:
+                    transformer.final_layer = torch.compile(transformer.final_layer, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+
+        del sd
+        mm.soft_empty_cache()
+
         scheduler = FlowMatchDiscreteScheduler(
             shift=9.0,
             reverse=True,
@@ -233,9 +290,10 @@ class HyVideoModelLoader:
         pipe = HunyuanVideoPipeline(
             transformer=transformer,
             scheduler=scheduler,
-            progress_bar_config=None
+            progress_bar_config=None,
+            base_dtype=base_dtype
         )
-
+        
         pipeline = {
             "pipe": pipe,
             "dtype": base_dtype,
@@ -243,7 +301,7 @@ class HyVideoModelLoader:
             "model_name": model,
             "manual_offloading": manual_offloading,
             "quantization": "disabled",
-            "block_swap_args": block_swap_args
+            "block_swap_args": block_swap_args,
         }
         return (pipeline,)
     
@@ -281,10 +339,13 @@ class HyVideoVAELoader:
         model_path = folder_paths.get_full_path("vae", model_name)
         vae_sd = load_torch_file(model_path)
 
-        vae = AutoencoderKLCausal3D.from_config(vae_config).to(dtype).to(offload_device)
+        vae = AutoencoderKLCausal3D.from_config(vae_config)
         vae.load_state_dict(vae_sd)
+        del vae_sd
         vae.requires_grad_(False)
         vae.eval()
+        vae.to(device = device, dtype = dtype)
+        
         #compile
         if compile_args is not None:
             torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
@@ -352,6 +413,7 @@ class DownloadAndLoadHyVideoTextEncoder:
             "optional": {
                 "apply_final_norm": ("BOOLEAN", {"default": False}),
                 "hidden_state_skip_layer": ("INT", {"default": 2}),
+                "quantization": (['disabled', 'bnb_nf4'], {"default": 'disabled'}),
             }
         }
 
@@ -361,11 +423,22 @@ class DownloadAndLoadHyVideoTextEncoder:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Loads Hunyuan text_encoder model from 'ComfyUI/models/LLM'"
 
-    def loadmodel(self, llm_model, clip_model, precision, apply_final_norm=False, hidden_state_skip_layer=2, use_prompt_templates=True):
+    def loadmodel(self, llm_model, clip_model, precision, apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled"):
         
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
+        if quantization == "bnb_nf4":
+            from transformers import BitsAndBytesConfig
+
+            quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.bfloat16
+            )
+        else:
+            quantization_config = None
         if clip_model != "disabled":
             clip_model_path = os.path.join(folder_paths.models_dir, "clip", "clip-vit-large-patch14")
             if not os.path.exists(clip_model_path):
@@ -405,14 +478,6 @@ class DownloadAndLoadHyVideoTextEncoder:
                 local_dir=base_path,
                 local_dir_use_symlinks=False,
             )
-        # prompt_template 
-        prompt_template = (
-            PROMPT_TEMPLATE["dit-llm-encode"]
-        )
-        # prompt_template_video
-        prompt_template_video = (
-            PROMPT_TEMPLATE["dit-llm-encode-video"]
-        )
        
         text_encoder = TextEncoder(
             text_encoder_path=base_path,
@@ -420,12 +485,12 @@ class DownloadAndLoadHyVideoTextEncoder:
             max_length=256,
             text_encoder_precision=precision,
             tokenizer_type="llm",
-            prompt_template=prompt_template,
-            prompt_template_video=prompt_template_video,
             hidden_state_skip_layer=hidden_state_skip_layer,
             apply_final_norm=apply_final_norm,
             logger=log,
             device=device,
+            dtype=dtype,
+            quantization_config=quantization_config
         )
        
         
@@ -435,7 +500,28 @@ class DownloadAndLoadHyVideoTextEncoder:
         }
        
         return (hyvid_text_encoders,)
-    
+
+class HyVideoCustomPromptTemplate:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "custom_prompt_template": ("STRING", {"default": f"{PROMPT_TEMPLATE['dit-llm-encode-video']['template']}", "multiline": True}),
+            "crop_start": ("INT", {"default": PROMPT_TEMPLATE['dit-llm-encode-video']["crop_start"], "tooltip": "To cropt the system prompt"}),
+            },
+        }
+
+    RETURN_TYPES = ("PROMPT_TEMPLATE", )
+    RETURN_NAMES = ("hyvid_prompt_template",)
+    FUNCTION = "process"
+    CATEGORY = "HunyuanVideoWrapper"
+
+    def process(self, custom_prompt_template, crop_start):
+        prompt_template_dict = {
+            "template": custom_prompt_template,
+            "crop_start": crop_start,
+        }
+        return (prompt_template_dict,)
+        
 class HyVideoTextEncode:
     @classmethod
     def INPUT_TYPES(s):
@@ -446,7 +532,9 @@ class HyVideoTextEncode:
             },
             "optional": {
                 "force_offload": ("BOOLEAN", {"default": True}),
-                 "use_prompt_templates": ("BOOLEAN", {"default": True, "tooltip": "Use the default prompt templates for the llm text encoder"}),
+                "prompt_template": (["video", "image", "custom", "disabled"], {"default": "video", "tooltip": "Use the default prompt templates for the llm text encoder"}),
+                "custom_prompt_template": ("PROMPT_TEMPLATE", {"default": PROMPT_TEMPLATE["dit-llm-encode-video"], "multiline": True}),
+                "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
             }
         }
 
@@ -455,30 +543,50 @@ class HyVideoTextEncode:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, text_encoders, prompt, force_offload=True, use_prompt_templates=True):
+    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None):
         device = mm.text_encoder_device()
         offload_device = mm.text_encoder_offload_device()
 
         text_encoder_1 = text_encoders["text_encoder"]
-        text_encoder_2 = text_encoders["text_encoder_2"]
+        if clip_l is None:
+            text_encoder_2 = text_encoders["text_encoder_2"]
+        else:
+            text_encoder_2 = None
 
         negative_prompt = None
-
-        text_encoder_1.use_template = use_prompt_templates
+        
+        if prompt_template != "disabled":
+            if prompt_template == "custom":
+                prompt_template_dict = custom_prompt_template
+            elif prompt_template == "video":
+                prompt_template_dict = PROMPT_TEMPLATE["dit-llm-encode-video"]
+            elif prompt_template == "image":
+                prompt_template_dict = PROMPT_TEMPLATE["dit-llm-encode"]
+            else:
+                raise ValueError(f"Invalid prompt_template: {prompt_template_dict}")
+            assert (
+                isinstance(prompt_template_dict, dict)
+                and "template" in prompt_template_dict
+            ), f"`prompt_template` must be a dictionary with a key 'template', got {prompt_template_dict}"
+            assert "{}" in str(prompt_template_dict["template"]), (
+                "`prompt_template['template']` must contain a placeholder `{}` for the input text, "
+                f"got {prompt_template_dict['template']}"
+            )
+        else:
+            prompt_template_dict = None
 
         def encode_prompt(self, prompt, negative_prompt, text_encoder):
             batch_size = 1
             num_videos_per_prompt = 1
-            do_classifier_free_guidance = False
-            data_type = "video"
+            do_classifier_free_guidance = False # not implemented, for now we only have cfg distilled model
             
-            text_inputs = text_encoder.text2tokens(prompt, data_type=data_type)
+            text_inputs = text_encoder.text2tokens(prompt, prompt_template=prompt_template_dict)
 
-            prompt_outputs = text_encoder.encode(text_inputs, data_type=data_type, device=device)
+            prompt_outputs = text_encoder.encode(text_inputs, prompt_template=prompt_template_dict, device=device)
             prompt_embeds = prompt_outputs.hidden_state
             
             attention_mask = prompt_outputs.attention_mask
-            print("prompt attention_mask: ", attention_mask.shape)
+            log.info(f"{text_encoder.text_encoder_type} prompt attention_mask shape: {attention_mask.shape}, masked tokens: {attention_mask[0].sum().item()}")
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
                 bs_embed, seq_len = attention_mask.shape
@@ -487,93 +595,86 @@ class HyVideoTextEncode:
                     bs_embed * num_videos_per_prompt, seq_len
                 )
 
-            if text_encoder is not None:
-                prompt_embeds_dtype = text_encoder.dtype
-            elif self.transformer is not None:
-                prompt_embeds_dtype = self.transformer.dtype
-            else:
-                prompt_embeds_dtype = prompt_embeds.dtype
+            prompt_embeds = prompt_embeds.to(dtype=text_encoder.dtype, device=device)
 
-            prompt_embeds = prompt_embeds.to(dtype=prompt_embeds_dtype, device=device)
-
-            if prompt_embeds.ndim == 2:
-                bs_embed, _ = prompt_embeds.shape
-                # duplicate text embeddings for each generation per prompt, using mps friendly method
-                prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt)
-                prompt_embeds = prompt_embeds.view(bs_embed * num_videos_per_prompt, -1)
-            else:
-                bs_embed, seq_len, _ = prompt_embeds.shape
-                # duplicate text embeddings for each generation per prompt, using mps friendly method
-                prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt, 1)
-                prompt_embeds = prompt_embeds.view(
-                    bs_embed * num_videos_per_prompt, seq_len, -1
-                )
+            # if prompt_embeds.ndim == 2:
+            #     bs_embed, _ = prompt_embeds.shape
+            #     # duplicate text embeddings for each generation per prompt, using mps friendly method
+            #     prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt)
+            #     prompt_embeds = prompt_embeds.view(bs_embed * num_videos_per_prompt, -1)
+            # else:
+            #     bs_embed, seq_len, _ = prompt_embeds.shape
+            #     # duplicate text embeddings for each generation per prompt, using mps friendly method
+            #     prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt, 1)
+            #     prompt_embeds = prompt_embeds.view(
+            #         bs_embed * num_videos_per_prompt, seq_len, -1
+            #     )
 
             # get unconditional embeddings for classifier free guidance
-            if do_classifier_free_guidance:
-                uncond_tokens: List[str]
-                if negative_prompt is None:
-                    uncond_tokens = [""] * batch_size
-                elif prompt is not None and type(prompt) is not type(negative_prompt):
-                    raise TypeError(
-                        f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
-                        f" {type(prompt)}."
-                    )
-                elif isinstance(negative_prompt, str):
-                    uncond_tokens = [negative_prompt]
-                elif batch_size != len(negative_prompt):
-                    raise ValueError(
-                        f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
-                        f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
-                        " the batch size of `prompt`."
-                    )
-                else:
-                    uncond_tokens = negative_prompt
+            # if do_classifier_free_guidance:
+            #     uncond_tokens: List[str]
+            #     if negative_prompt is None:
+            #         uncond_tokens = [""] * batch_size
+            #     elif prompt is not None and type(prompt) is not type(negative_prompt):
+            #         raise TypeError(
+            #             f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
+            #             f" {type(prompt)}."
+            #         )
+            #     elif isinstance(negative_prompt, str):
+            #         uncond_tokens = [negative_prompt]
+            #     elif batch_size != len(negative_prompt):
+            #         raise ValueError(
+            #             f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
+            #             f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
+            #             " the batch size of `prompt`."
+            #         )
+            #     else:
+            #         uncond_tokens = negative_prompt
 
-                # max_length = prompt_embeds.shape[1]
-                uncond_input = text_encoder.text2tokens(uncond_tokens, data_type=data_type)
+            #     # max_length = prompt_embeds.shape[1]
+            #     uncond_input = text_encoder.text2tokens(uncond_tokens, data_type=data_type)
 
-                negative_prompt_outputs = text_encoder.encode(
-                    uncond_input, data_type=data_type, device=device
-                )
-                negative_prompt_embeds = negative_prompt_outputs.hidden_state
+            #     negative_prompt_outputs = text_encoder.encode(
+            #         uncond_input, data_type=data_type, device=device
+            #     )
+            #     negative_prompt_embeds = negative_prompt_outputs.hidden_state
 
-                negative_attention_mask = negative_prompt_outputs.attention_mask
-                if negative_attention_mask is not None:
-                    negative_attention_mask = negative_attention_mask.to(device)
-                    _, seq_len = negative_attention_mask.shape
-                    negative_attention_mask = negative_attention_mask.repeat(
-                        1, num_videos_per_prompt
-                    )
-                    negative_attention_mask = negative_attention_mask.view(
-                        batch_size * num_videos_per_prompt, seq_len
-                    )
-            else:
-                negative_prompt_embeds = None
-                negative_attention_mask = None
+            #     negative_attention_mask = negative_prompt_outputs.attention_mask
+            #     if negative_attention_mask is not None:
+            #         negative_attention_mask = negative_attention_mask.to(device)
+            #         _, seq_len = negative_attention_mask.shape
+            #         negative_attention_mask = negative_attention_mask.repeat(
+            #             1, num_videos_per_prompt
+            #         )
+            #         negative_attention_mask = negative_attention_mask.view(
+            #             batch_size * num_videos_per_prompt, seq_len
+            #         )
+            # else:
+            negative_prompt_embeds = None
+            negative_attention_mask = None
 
-            if do_classifier_free_guidance:
-                # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
-                seq_len = negative_prompt_embeds.shape[1]
+            # if do_classifier_free_guidance:
+            #     # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
+            #     seq_len = negative_prompt_embeds.shape[1]
 
-                negative_prompt_embeds = negative_prompt_embeds.to(
-                    dtype=prompt_embeds_dtype, device=device
-                )
+            #     negative_prompt_embeds = negative_prompt_embeds.to(
+            #         dtype=prompt_embeds_dtype, device=device
+            #     )
 
-                if negative_prompt_embeds.ndim == 2:
-                    negative_prompt_embeds = negative_prompt_embeds.repeat(
-                        1, num_videos_per_prompt
-                    )
-                    negative_prompt_embeds = negative_prompt_embeds.view(
-                        batch_size * num_videos_per_prompt, -1
-                    )
-                else:
-                    negative_prompt_embeds = negative_prompt_embeds.repeat(
-                        1, num_videos_per_prompt, 1
-                    )
-                    negative_prompt_embeds = negative_prompt_embeds.view(
-                        batch_size * num_videos_per_prompt, seq_len, -1
-                    )
+            #     if negative_prompt_embeds.ndim == 2:
+            #         negative_prompt_embeds = negative_prompt_embeds.repeat(
+            #             1, num_videos_per_prompt
+            #         )
+            #         negative_prompt_embeds = negative_prompt_embeds.view(
+            #             batch_size * num_videos_per_prompt, -1
+            #         )
+            #     else:
+            #         negative_prompt_embeds = negative_prompt_embeds.repeat(
+            #             1, num_videos_per_prompt, 1
+            #         )
+            #         negative_prompt_embeds = negative_prompt_embeds.view(
+            #             batch_size * num_videos_per_prompt, seq_len, -1
+            #         )
 
             return (
                 prompt_embeds,
@@ -592,6 +693,17 @@ class HyVideoTextEncode:
             prompt_embeds_2, negative_prompt_embeds_2, attention_mask_2, negative_attention_mask_2 = encode_prompt(self, prompt, negative_prompt, text_encoder_2)
             if force_offload:
                 text_encoder_2.to(offload_device)
+                mm.soft_empty_cache()
+        elif clip_l is not None:
+            clip_l.cond_stage_model.to(device)
+            tokens = clip_l.tokenize(prompt, return_word_ids=True)
+            prompt_embeds_2 = clip_l.encode_from_tokens(tokens, return_pooled=True, return_dict=False)[1]
+            prompt_embeds_2 = prompt_embeds_2.to(device=device)
+
+            negative_prompt_embeds_2, attention_mask_2, negative_attention_mask_2 = None, None, None
+          
+            if force_offload:
+                clip_l.cond_stage_model.to(offload_device)
                 mm.soft_empty_cache()
         else:
             prompt_embeds_2 = None
@@ -633,6 +745,7 @@ class HyVideoSampler:
             "optional": {
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "stg_args": ("STGARGS", ),
             }
         }
 
@@ -641,20 +754,19 @@ class HyVideoSampler:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, samples=None, denoise_strength=1.0, force_offload=True):
-        mm.unload_all_models()
-        mm.soft_empty_cache()
-
+    def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, samples=None, denoise_strength=1.0, force_offload=True, stg_args=None):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         dtype = model["dtype"]
+        transformer = model["pipe"].transformer
+
+        if stg_args is not None:
+            if stg_args["stg_mode"] == "STG-A" and transformer.attention_mode != "sdpa":
+                raise ValueError(
+                    f"STG-A requires attention_mode to be 'sdpa', but got {transformer.attention_mode}."
+            )
         
         generator = torch.Generator(device=torch.device("cpu")).manual_seed(seed)
-
-        try:
-            torch.cuda.reset_peak_memory_stats(device)
-        except:
-            pass
 
         if width <= 0 or height <= 0 or num_frames <= 0:
             raise ValueError(
@@ -684,17 +796,34 @@ class HyVideoSampler:
         # ) if any(q in model["quantization"] for q in ("e4m3fn", "GGUF")) else nullcontext()
         #with autocast_context:
         if model["block_swap_args"] is not None:
-            for name, param in model["pipe"].transformer.named_parameters():
+            for name, param in transformer.named_parameters():
                 #print(name, param.data.device)
                 if "single" not in name and "double" not in name:
                     param.data = param.data.to(device)
                 
-            model["pipe"].transformer.block_swap(model["block_swap_args"]["double_blocks_to_swap"] , model["block_swap_args"]["single_blocks_to_swap"])
-            # for name, param in model["pipe"].transformer.named_parameters():
-            #     print(name, param.data.device)
-          
+            transformer.block_swap(
+                model["block_swap_args"]["double_blocks_to_swap"] - 1 , 
+                model["block_swap_args"]["single_blocks_to_swap"] - 1,
+                offload_txt_in = model["block_swap_args"]["offload_txt_in"],
+                offload_img_in = model["block_swap_args"]["offload_img_in"],
+            )
+
+            mm.soft_empty_cache()
+            gc.collect()
         elif model["manual_offloading"]:
-            model["pipe"].transformer.to(device)
+            transformer.to(device)
+
+        mm.unload_all_models()
+        mm.soft_empty_cache()
+        gc.collect()
+        
+        try:
+            torch.cuda.reset_peak_memory_stats(device)
+        except:
+            pass
+                
+        #for name, param in transformer.named_parameters():
+        #    print(name, param.data.device)
         
         out_latents = model["pipe"](
             num_inference_steps=steps,
@@ -709,6 +838,11 @@ class HyVideoSampler:
             generator=generator,
             freqs_cis=(freqs_cos, freqs_sin),
             n_tokens=n_tokens,
+            stg_mode=stg_args["stg_mode"] if stg_args is not None else None,
+            stg_block_idx=stg_args["stg_block_idx"] if stg_args is not None else -1,
+            stg_scale=stg_args["stg_scale"] if stg_args is not None else 0.0,
+            stg_start_percent=stg_args["stg_start_percent"] if stg_args is not None else 0.0,
+            stg_end_percent=stg_args["stg_end_percent"] if stg_args is not None else 1.0,
         )
 
         print_memory(device)
@@ -716,11 +850,12 @@ class HyVideoSampler:
             torch.cuda.reset_peak_memory_stats(device)
         except:
             pass
-
+        
         if force_offload:
             if model["manual_offloading"]:
-                model["pipe"].transformer.to(offload_device)
+                transformer.to(offload_device)
                 mm.soft_empty_cache()
+                gc.collect()
 
         return ({
             "samples": out_latents
@@ -735,7 +870,9 @@ class HyVideoDecode:
                     "vae": ("VAE",),
                     "samples": ("LATENT",),
                     "enable_vae_tiling": ("BOOLEAN", {"default": True, "tooltip": "Drastically reduces memory use but may introduce seams"}),
-                    "temporal_tiling_sample_size": ("INT", {"default": 16, "min": 4, "max": 256, "tooltip": "Smaller values use less VRAM, model default is 64 which doesn't fit on most GPUs"}),
+                    "temporal_tiling_sample_size": ("INT", {"default": 16, "min": 4, "max": 256, "tooltip": "Smaller values use less VRAM, model default is 64, any other value will cause stutter"}),
+                    "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
+                    "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
                     },            
                 }
 
@@ -744,13 +881,26 @@ class HyVideoDecode:
     FUNCTION = "decode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def decode(self, vae, samples, enable_vae_tiling, temporal_tiling_sample_size):
+    def decode(self, vae, samples, enable_vae_tiling, temporal_tiling_sample_size, spatial_tile_sample_min_size, auto_tile_size):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+        mm.soft_empty_cache()
         latents = samples["samples"]
         generator = torch.Generator(device=torch.device("cpu"))#.manual_seed(seed)
         vae.to(device)
-        vae.sample_tsize = temporal_tiling_sample_size
+        if not auto_tile_size:
+            vae.tile_latent_min_tsize = temporal_tiling_sample_size // 4
+            vae.tile_sample_min_size = spatial_tile_sample_min_size
+            vae.tile_latent_min_size = spatial_tile_sample_min_size // 8
+            if temporal_tiling_sample_size != 64:
+                vae.t_tile_overlap_factor = 0.0
+            else:
+                vae.t_tile_overlap_factor = 0.25
+        else:
+            #defaults
+            vae.tile_latent_min_tsize = 16
+            vae.tile_sample_min_size = 256
+            vae.tile_latent_min_size = 32
         
         
         expand_temporal_dim = False
@@ -783,15 +933,20 @@ class HyVideoDecode:
 
         vae.to(offload_device)
         mm.soft_empty_cache()
-       
-        video_processor = VideoProcessor(vae_scale_factor=8)
-        video_processor.config.do_resize = False
 
-        video = video_processor.postprocess_video(video=video, output_type="pt")
-        video = video[0].permute(0, 2, 3, 1).cpu().float()
+        if len(video.shape) == 5:
+            video_processor = VideoProcessor(vae_scale_factor=8)
+            video_processor.config.do_resize = False
 
-        return (video,)
-    
+            video = video_processor.postprocess_video(video=video, output_type="pt")
+            out = video[0].permute(0, 2, 3, 1).cpu().float()
+        else:
+            out = (video / 2 + 0.5).clamp(0, 1)
+            out = out.permute(0, 2, 3, 1).cpu().float()
+
+        return (out,)
+
+#region VideoEncode    
 class HyVideoEncode:
     @classmethod
     def INPUT_TYPES(s):
@@ -799,7 +954,9 @@ class HyVideoEncode:
                     "vae": ("VAE",),
                     "image": ("IMAGE",),
                     "enable_vae_tiling": ("BOOLEAN", {"default": True, "tooltip": "Drastically reduces memory use but may introduce seams"}),
-                    "temporal_tiling_sample_size": ("INT", {"default": 16, "min": 4, "max": 256, "tooltip": "Smaller values use less VRAM, model default is 64 which doesn't fit on most GPUs"}),
+                    "temporal_tiling_sample_size": ("INT", {"default": 16, "min": 4, "max": 256, "tooltip": "Smaller values use less VRAM, model default is 64, any other value will cause stutter"}),
+                    "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
+                    "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
                     },            
                 }
 
@@ -808,13 +965,25 @@ class HyVideoEncode:
     FUNCTION = "encode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size):
+    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, spatial_tile_sample_min_size):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         
         generator = torch.Generator(device=torch.device("cpu"))#.manual_seed(seed)
         vae.to(device)
-        vae.sample_tsize = temporal_tiling_sample_size
+        if not auto_tile_size:
+            vae.tile_latent_min_tsize = temporal_tiling_sample_size // 4
+            vae.tile_sample_min_size = spatial_tile_sample_min_size
+            vae.tile_latent_min_size = spatial_tile_sample_min_size // 8
+            if temporal_tiling_sample_size != 64:
+                vae.t_tile_overlap_factor = 0.0
+            else:
+                vae.t_tile_overlap_factor = 0.25
+        else:
+            #defaults
+            vae.tile_latent_min_tsize = 16
+            vae.tile_sample_min_size = 256
+            vae.tile_latent_min_size = 32
 
         image = (image * 2.0 - 1.0).to(vae.dtype).to(device).unsqueeze(0).permute(0, 4, 1, 2, 3) # B, C, T, H, W
         if enable_vae_tiling:
@@ -898,6 +1067,8 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoEncode": HyVideoEncode,
     "HyVideoBlockSwap": HyVideoBlockSwap,
     "HyVideoTorchCompileSettings": HyVideoTorchCompileSettings,
+    "HyVideoSTG": HyVideoSTG,
+    "HyVideoCustomPromptTemplate": HyVideoCustomPromptTemplate,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -909,4 +1080,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoEncode": "HunyuanVideo Encode",
     "HyVideoBlockSwap": "HunyuanVideo BlockSwap",
     "HyVideoTorchCompileSettings": "HunyuanVideo Torch Compile Settings",
+    "HyVideoSTG": "HunyuanVideo STG",
+    "HyVideoCustomPromptTemplate": "HunyuanVideo Custom Prompt Template",
     }

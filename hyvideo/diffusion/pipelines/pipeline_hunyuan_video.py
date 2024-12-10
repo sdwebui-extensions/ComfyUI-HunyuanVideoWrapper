@@ -21,12 +21,9 @@ from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 import torch
 
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
-from diffusers.configuration_utils import FrozenDict
-from diffusers.image_processor import VaeImageProcessor
 
 from diffusers.schedulers import KarrasDiffusionSchedulers
 from diffusers.utils import (
-    deprecate,
     logging,
     replace_example_docstring
 )
@@ -39,25 +36,6 @@ from comfy.utils import ProgressBar
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 EXAMPLE_DOC_STRING = """"""
-
-
-def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
-    """
-    Rescale `noise_cfg` according to `guidance_rescale`. Based on findings of [Common Diffusion Noise Schedules and
-    Sample Steps are Flawed](https://arxiv.org/pdf/2305.08891.pdf). See Section 3.4
-    """
-    std_text = noise_pred_text.std(
-        dim=list(range(1, noise_pred_text.ndim)), keepdim=True
-    )
-    std_cfg = noise_cfg.std(dim=list(range(1, noise_cfg.ndim)), keepdim=True)
-    # rescale the results from guidance (fixes overexposure)
-    noise_pred_rescaled = noise_cfg * (std_text / std_cfg)
-    # mix with the original results from guidance by factor guidance_rescale to avoid "plain looking" images
-    noise_cfg = (
-        guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
-    )
-    return noise_cfg
-
 
 def retrieve_timesteps(
     scheduler,
@@ -137,7 +115,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             A scheduler to be used in combination with `unet` to denoise the encoded image latents.
     """
 
-    # model_cpu_offload_seq = "text_encoder->text_encoder_2->transformer->vae"
+    #model_cpu_offload_seq = "transformer"
     # _optional_components = ["text_encoder_2"]
     # _exclude_from_cpu_offload = ["transformer"]
     # _callback_tensor_inputs = ["latents", "prompt_embeds", "negative_prompt_embeds"]
@@ -166,7 +144,6 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             scheduler=scheduler
         )
         self.vae_scale_factor = 8
-        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
 
     def prepare_extra_func_kwargs(self, func, kwargs):
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
@@ -201,7 +178,6 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         height,
         width,
         video_length,
-        dtype,
         device,
         timesteps,
         generator,
@@ -220,7 +196,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
-        noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+        noise = randn_tensor(shape, generator=generator, device=device, dtype=self.base_dtype)
         if latents is None:
             latents = noise
         else:
@@ -302,6 +278,11 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         return self._guidance_scale > 1
 
     @property
+    def do_spatio_temporal_guidance(self):
+        # return self._guidance_scale > 1 and self.transformer.config.time_cond_proj_dim is None
+        return self._stg_scale > 0
+
+    @property
     def cross_attention_kwargs(self):
         return self._cross_attention_kwargs
 
@@ -345,6 +326,11 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         freqs_cis: Tuple[torch.Tensor, torch.Tensor] = None,
         n_tokens: Optional[int] = None,
         embedded_guidance_scale: Optional[float] = None,
+        stg_mode: Optional[str] = None,
+        stg_block_idx: Optional[int] = -1,
+        stg_scale: Optional[float] = 0.0,
+        stg_start_percent: Optional[float] = 0.0,
+        stg_end_percent: Optional[float] = 1.0,
         **kwargs,
     ):
         r"""
@@ -426,7 +412,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         self._clip_skip = clip_skip
         self._cross_attention_kwargs = cross_attention_kwargs
         self._interrupt = False
-
+        self._stg_scale = stg_scale
         # 2. Define call parameters
        
         batch_size = 1
@@ -438,26 +424,50 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         negative_prompt_mask = prompt_embed_dict["negative_attention_mask"]
         prompt_embeds_2 = prompt_embed_dict["prompt_embeds_2"]
         negative_prompt_embeds_2 = prompt_embed_dict["negative_prompt_embeds_2"]
-        prompt_mask_2 = prompt_embed_dict["attention_mask_2"]
-        negative_prompt_mask_2 = prompt_embed_dict["negative_attention_mask_2"]
+        #prompt_mask_2 = prompt_embed_dict["attention_mask_2"]
+        #negative_prompt_mask_2 = prompt_embed_dict["negative_attention_mask_2"]
 
         # For classifier free guidance, we need to do two forward passes.
         # Here we concatenate the unconditional and text embeddings into a single batch
         # to avoid doing two forward passes
-        if self.do_classifier_free_guidance:
+        if self.do_classifier_free_guidance and not self.do_spatio_temporal_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
             if prompt_mask is not None:
                 prompt_mask = torch.cat([negative_prompt_mask, prompt_mask])
             if prompt_embeds_2 is not None:
                 prompt_embeds_2 = torch.cat([negative_prompt_embeds_2, prompt_embeds_2])
-            if prompt_mask_2 is not None:
-                prompt_mask_2 = torch.cat([negative_prompt_mask_2, prompt_mask_2])
-
+            #if prompt_mask_2 is not None:
+            #    prompt_mask_2 = torch.cat([negative_prompt_mask_2, prompt_mask_2])
+        elif self.do_classifier_free_guidance and self.do_spatio_temporal_guidance:
+            prompt_embeds = torch.cat(
+                [negative_prompt_embeds, prompt_embeds, prompt_embeds]
+            )
+            if prompt_mask is not None:
+                prompt_mask = torch.cat([negative_prompt_mask, prompt_mask, prompt_mask])
+            if prompt_embeds_2 is not None:
+                prompt_embeds_2 = torch.cat(
+                    [negative_prompt_embeds_2, prompt_embeds_2, prompt_embeds_2]
+                )
+            #if prompt_mask_2 is not None:
+            #    prompt_mask_2 = torch.cat(
+            #        [negative_prompt_mask_2, prompt_mask_2, prompt_mask_2]
+            #    )
+        elif self.do_spatio_temporal_guidance:
+            prompt_embeds = torch.cat([prompt_embeds, prompt_embeds])
+            if prompt_mask is not None:
+                prompt_mask = torch.cat([prompt_mask, prompt_mask])
+            if prompt_embeds_2 is not None:
+                prompt_embeds_2 = torch.cat([prompt_embeds_2, prompt_embeds_2])
+            #if prompt_mask_2 is not None:
+            #    prompt_mask_2 = torch.cat([prompt_mask_2, prompt_mask_2])
+            
 
         # 4. Prepare timesteps
         extra_set_timesteps_kwargs = self.prepare_extra_func_kwargs(
             self.scheduler.set_timesteps, {"n_tokens": n_tokens}
         )
+        if hasattr(self.scheduler, "set_begin_index") and denoise_strength == 1.0:
+            self.scheduler.set_begin_index(begin_index=0)
         timesteps, num_inference_steps = retrieve_timesteps(
             self.scheduler,
             num_inference_steps,
@@ -482,7 +492,6 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             height,
             width,
             latent_video_length,
-            prompt_embeds.dtype,
             device,
             timesteps,
             generator,
@@ -501,19 +510,38 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         self._num_timesteps = len(timesteps)
 
         
-        logger.info(f"Sampling {video_length} frames in {latents.shape[2]} latents at {width}x{height} with {num_inference_steps} inference steps")
-        comfy_pbar = ProgressBar(num_inference_steps)
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
+        logger.info(f"Sampling {video_length} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")
+        comfy_pbar = ProgressBar(len(timesteps))
+        with self.progress_bar(total=len(timesteps)) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
 
-                # expand the latents if we are doing classifier free guidance
-                latent_model_input = (
+                current_step_percentage = i / len(timesteps)
+                if self.do_spatio_temporal_guidance:
+                    if stg_start_percent <= current_step_percentage <= stg_end_percent:
+                        stg_enabled = True
+                        if self.do_classifier_free_guidance:
+                            latent_model_input = torch.cat([latents] * 3)
+                        else:
+                            latent_model_input = torch.cat([latents] * 2)
+                    else:
+                        stg_enabled = False
+                        stg_mode = None
+                        stg_block_idx = -1
+                        prompt_embeds = prompt_embeds[0].unsqueeze(0)
+                        prompt_mask = prompt_mask[0].unsqueeze(0)
+                        prompt_embeds_2 = prompt_embeds_2[0].unsqueeze(0)
+                        latent_model_input = latents
+                else:
+                    stg_enabled = False
+                    # expand the latents if we are doing classifier free guidance
+                    latent_model_input = (
                     torch.cat([latents] * 2)
                     if self.do_classifier_free_guidance
                     else latents
                 )
+
                 latent_model_input = self.scheduler.scale_model_input(
                     latent_model_input, t
                 )
@@ -543,22 +571,29 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                         freqs_cos=freqs_cis[0],  # [seqlen, head_dim]
                         freqs_sin=freqs_cis[1],  # [seqlen, head_dim]
                         guidance=guidance_expand,
+                        stg_block_idx=stg_block_idx,
+                        stg_mode=stg_mode,
                         return_dict=True,
                     )["x"]
 
                 # perform guidance
-                if self.do_classifier_free_guidance:
+                if self.do_classifier_free_guidance and not self.do_spatio_temporal_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (
                         noise_pred_text - noise_pred_uncond
                     )
-
-                if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
-                    # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
-                    noise_pred = rescale_noise_cfg(
-                        noise_pred,
-                        noise_pred_text,
-                        guidance_rescale=self.guidance_rescale,
+                elif self.do_classifier_free_guidance and self.do_spatio_temporal_guidance:
+                    raise NotImplementedError
+                    noise_pred_uncond, noise_pred_text, noise_pred_perturb = noise_pred.chunk(3)
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (
+                        noise_pred_text - noise_pred_uncond
+                    ) + self._stg_scale * (
+                        noise_pred_text - noise_pred_perturb
+                    )
+                elif self.do_spatio_temporal_guidance and stg_enabled:
+                    noise_pred_text, noise_pred_perturb = noise_pred.chunk(2)
+                    noise_pred = noise_pred_text + self._stg_scale * (
+                        noise_pred_text - noise_pred_perturb
                     )
 
                 # compute the previous noisy sample x_t -> x_t-1
@@ -592,6 +627,6 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         #latents = (latents / 2 + 0.5).clamp(0, 1).cpu()
 
         # Offload all models
-        self.maybe_free_model_hooks()
+        #self.maybe_free_model_hooks()
 
         return latents
