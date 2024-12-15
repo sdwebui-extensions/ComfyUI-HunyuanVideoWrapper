@@ -568,7 +568,6 @@ class DownloadAndLoadHyVideoTextEncoder:
             "required": {
                 "llm_model": (["Kijai/llava-llama-3-8b-text-encoder-tokenizer","xtuner/llava-llama-3-8b-v1_1-transformers"],),
                 "clip_model": (["disabled","openai/clip-vit-large-patch14",],),
-                "lm_type": (["languague","vision_languague"],),
                  "precision": (["fp16", "fp32", "bf16"],
                     {"default": "bf16"}
                 ),
@@ -586,8 +585,12 @@ class DownloadAndLoadHyVideoTextEncoder:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Loads Hunyuan text_encoder model from 'ComfyUI/models/LLM'"
 
-    def loadmodel(self, llm_model, clip_model, precision, lm_type, apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled"):
-
+    def loadmodel(self, llm_model, clip_model, precision,  apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled"):
+        lm_type_mapping = {
+            "Kijai/llava-llama-3-8b-text-encoder-tokenizer": "llm",
+            "xtuner/llava-llama-3-8b-v1_1-transformers": "vlm",
+        }
+        lm_type = lm_type_mapping[llm_model]
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
@@ -636,11 +639,6 @@ class DownloadAndLoadHyVideoTextEncoder:
                 local_dir=base_path,
                 local_dir_use_symlinks=False,
             )
-        LM_TYPE = {
-            "languague": "llm",
-            "vision_languague": "vlm",
-        }
-        lm_type = LM_TYPE.get(lm_type, "llm")
         text_encoder = TextEncoder(
             text_encoder_path=base_path,
             text_encoder_type=lm_type,
@@ -708,16 +706,12 @@ class HyVideoTextEncode:
         return {"required": {
             "text_encoders": ("HYVIDTEXTENCODER",),
             "prompt": ("STRING", {"default": "", "multiline": True} ),
-            "image_token_selection_expr": ("STRING", {"default": "::4", "multiline": False} ),
             },
             "optional": {
                 "force_offload": ("BOOLEAN", {"default": True}),
                 "prompt_template": (["video", "image", "custom", "disabled"], {"default": "video", "tooltip": "Use the default prompt templates for the llm text encoder"}),
                 "custom_prompt_template": ("PROMPT_TEMPLATE", {"default": PROMPT_TEMPLATE["dit-llm-encode-video"], "multiline": True}),
                 "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
-                "image1": ("IMAGE", {"default": None}),
-                "image2": ("IMAGE", {"default": None}),
-                "clip_text_override": ("STRING", {"default": "", "multiline": True} ),
                 "hyvid_cfg": ("HYVID_CFG", ),
             }
         }
@@ -727,8 +721,8 @@ class HyVideoTextEncode:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_strategy="text_only", image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None):
-        if len(clip_text_override) == 0:
+    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None):
+        if clip_text_override is not None and len(clip_text_override) == 0:
             clip_text_override = None
         device = mm.text_encoder_device()
         offload_device = mm.text_encoder_offload_device()
@@ -766,7 +760,7 @@ class HyVideoTextEncode:
         else:
             prompt_template_dict = None
 
-        def encode_prompt(self, prompt, negative_prompt, text_encoder, image_token_strategy="text_only", image_token_selection_expr="::4", image1=None, image2=None, clip_text_override=None):
+        def encode_prompt(self, prompt, negative_prompt, text_encoder, image_token_selection_expr="::4", image1=None, image2=None, clip_text_override=None):
             batch_size = 1
             num_videos_per_prompt = 1
 
@@ -777,7 +771,6 @@ class HyVideoTextEncode:
                                                    clip_text_override=clip_text_override)
             prompt_outputs = text_encoder.encode(text_inputs, 
                                                  prompt_template=prompt_template_dict, 
-                                                 image_token_strategy=image_token_strategy, 
                                                  image_token_selection_expr=image_token_selection_expr, 
                                                  device=device
                                                  )
@@ -850,7 +843,6 @@ class HyVideoTextEncode:
                                                                                                             prompt,
                                                                                                             negative_prompt, 
                                                                                                             text_encoder_1, 
-                                                                                                            image_token_strategy=image_token_strategy, 
                                                                                                             image_token_selection_expr=image_token_selection_expr,
                                                                                                             image1=image1,
                                                                                                             image2=image2)
@@ -901,6 +893,32 @@ class HyVideoTextEncode:
                 "end_percent": torch.tensor(hyvid_cfg["end_percent"]) if hyvid_cfg is not None else None,
             }
         return (prompt_embeds_dict,)
+
+class HyVideoTextImageEncode(HyVideoTextEncode):
+    # Experimental Image Prompt to Video (IP2V) via VLM implementation by @Dango233
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "text_encoders": ("HYVIDTEXTENCODER",),
+            "prompt": ("STRING", {"default": "", "multiline": True} ),
+            "image_token_selection_expr": ("STRING", {"default": "::4", "multiline": False} ),
+            },
+            "optional": {
+                "force_offload": ("BOOLEAN", {"default": True}),
+                "prompt_template": (["video", "image", "custom", "disabled"], {"default": "video", "tooltip": "Use the default prompt templates for the llm text encoder"}),
+                "custom_prompt_template": ("PROMPT_TEMPLATE", {"default": PROMPT_TEMPLATE["dit-llm-encode-video"], "multiline": True}),
+                "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
+                "image1": ("IMAGE", {"default": None}),
+                "image2": ("IMAGE", {"default": None}),
+                "clip_text_override": ("STRING", {"default": "", "multiline": True} ),
+                "hyvid_cfg": ("HYVID_CFG", ),
+            }
+        }
+
+    RETURN_TYPES = ("HYVIDEMBEDS", )
+    RETURN_NAMES = ("hyvid_embeds",)
+    FUNCTION = "process"
+    CATEGORY = "HunyuanVideoWrapper"
 
 # region CFG    
 class HyVideoCFG:
@@ -1365,6 +1383,7 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoSampler": HyVideoSampler,
     "HyVideoDecode": HyVideoDecode,
     "HyVideoTextEncode": HyVideoTextEncode,
+    "HyVideoTextImageEncode": HyVideoTextImageEncode,
     "HyVideoModelLoader": HyVideoModelLoader,
     "HyVideoVAELoader": HyVideoVAELoader,
     "DownloadAndLoadHyVideoTextEncoder": DownloadAndLoadHyVideoTextEncoder,
@@ -1384,6 +1403,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
     "HyVideoDecode": "HunyuanVideo Decode",
     "HyVideoTextEncode": "HunyuanVideo TextEncode",
+    "HyVideoTextImageEncode": "HunyuanVideo TextImageEncode (IP2V)",
     "HyVideoModelLoader": "HunyuanVideo Model Loader",
     "HyVideoVAELoader": "HunyuanVideo VAE Loader",
     "DownloadAndLoadHyVideoTextEncoder": "(Down)Load HunyuanVideo TextEncoder",
