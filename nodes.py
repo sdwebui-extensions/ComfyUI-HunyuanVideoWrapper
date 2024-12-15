@@ -566,9 +566,9 @@ class DownloadAndLoadHyVideoTextEncoder:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "llm_model": (["Kijai/llava-llama-3-8b-text-encoder-tokenizer",],),
+                "llm_model": (["Kijai/llava-llama-3-8b-text-encoder-tokenizer","xtuner/llava-llama-3-8b-v1_1-transformers"],),
                 "clip_model": (["disabled","openai/clip-vit-large-patch14",],),
-
+                "lm_type": (["languague","vision_languague"],),
                  "precision": (["fp16", "fp32", "bf16"],
                     {"default": "bf16"}
                 ),
@@ -586,7 +586,7 @@ class DownloadAndLoadHyVideoTextEncoder:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Loads Hunyuan text_encoder model from 'ComfyUI/models/LLM'"
 
-    def loadmodel(self, llm_model, clip_model, precision, apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled"):
+    def loadmodel(self, llm_model, clip_model, precision, lm_type, apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled"):
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -636,13 +636,17 @@ class DownloadAndLoadHyVideoTextEncoder:
                 local_dir=base_path,
                 local_dir_use_symlinks=False,
             )
-
+        LM_TYPE = {
+            "languague": "llm",
+            "vision_languague": "vlm",
+        }
+        lm_type = LM_TYPE.get(lm_type, "llm")
         text_encoder = TextEncoder(
             text_encoder_path=base_path,
-            text_encoder_type="llm",
+            text_encoder_type=lm_type,
             max_length=256,
             text_encoder_precision=precision,
-            tokenizer_type="llm",
+            tokenizer_type=lm_type,
             hidden_state_skip_layer=hidden_state_skip_layer,
             apply_final_norm=apply_final_norm,
             logger=log,
@@ -704,12 +708,16 @@ class HyVideoTextEncode:
         return {"required": {
             "text_encoders": ("HYVIDTEXTENCODER",),
             "prompt": ("STRING", {"default": "", "multiline": True} ),
+            "image_token_selection_expr": ("STRING", {"default": "::4", "multiline": False} ),
             },
             "optional": {
                 "force_offload": ("BOOLEAN", {"default": True}),
                 "prompt_template": (["video", "image", "custom", "disabled"], {"default": "video", "tooltip": "Use the default prompt templates for the llm text encoder"}),
                 "custom_prompt_template": ("PROMPT_TEMPLATE", {"default": PROMPT_TEMPLATE["dit-llm-encode-video"], "multiline": True}),
                 "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
+                "image1": ("IMAGE", {"default": None}),
+                "image2": ("IMAGE", {"default": None}),
+                "clip_text_override": ("STRING", {"default": "", "multiline": True} ),
                 "hyvid_cfg": ("HYVID_CFG", ),
             }
         }
@@ -719,7 +727,9 @@ class HyVideoTextEncode:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, hyvid_cfg=None):
+    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_strategy="text_only", image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None):
+        if len(clip_text_override) == 0:
+            clip_text_override = None
         device = mm.text_encoder_device()
         offload_device = mm.text_encoder_offload_device()
 
@@ -756,12 +766,21 @@ class HyVideoTextEncode:
         else:
             prompt_template_dict = None
 
-        def encode_prompt(self, prompt, negative_prompt, text_encoder):
+        def encode_prompt(self, prompt, negative_prompt, text_encoder, image_token_strategy="text_only", image_token_selection_expr="::4", image1=None, image2=None, clip_text_override=None):
             batch_size = 1
             num_videos_per_prompt = 1
 
-            text_inputs = text_encoder.text2tokens(prompt, prompt_template=prompt_template_dict)
-            prompt_outputs = text_encoder.encode(text_inputs, prompt_template=prompt_template_dict, device=device)
+            text_inputs = text_encoder.text2tokens(prompt, 
+                                                   prompt_template=prompt_template_dict,
+                                                   image1=image1,
+                                                   image2=image2,
+                                                   clip_text_override=clip_text_override)
+            prompt_outputs = text_encoder.encode(text_inputs, 
+                                                 prompt_template=prompt_template_dict, 
+                                                 image_token_strategy=image_token_strategy, 
+                                                 image_token_selection_expr=image_token_selection_expr, 
+                                                 device=device
+                                                 )
             prompt_embeds = prompt_outputs.hidden_state
 
             attention_mask = prompt_outputs.attention_mask
@@ -827,20 +846,27 @@ class HyVideoTextEncode:
             )
         text_encoder_1.to(device)
         with torch.autocast(device_type=mm.get_autocast_device(device), dtype=text_encoder_1.dtype, enabled=text_encoder_1.is_fp8):
-            prompt_embeds, negative_prompt_embeds, attention_mask, negative_attention_mask = encode_prompt(self, prompt, negative_prompt, text_encoder_1)
+            prompt_embeds, negative_prompt_embeds, attention_mask, negative_attention_mask = encode_prompt(self,
+                                                                                                            prompt,
+                                                                                                            negative_prompt, 
+                                                                                                            text_encoder_1, 
+                                                                                                            image_token_strategy=image_token_strategy, 
+                                                                                                            image_token_selection_expr=image_token_selection_expr,
+                                                                                                            image1=image1,
+                                                                                                            image2=image2)
         if force_offload:
             text_encoder_1.to(offload_device)
             mm.soft_empty_cache()
 
         if text_encoder_2 is not None:
             text_encoder_2.to(device)
-            prompt_embeds_2, negative_prompt_embeds_2, attention_mask_2, negative_attention_mask_2 = encode_prompt(self, prompt, negative_prompt, text_encoder_2)
+            prompt_embeds_2, negative_prompt_embeds_2, attention_mask_2, negative_attention_mask_2 = encode_prompt(self, prompt, negative_prompt, text_encoder_2, clip_text_override=clip_text_override)
             if force_offload:
                 text_encoder_2.to(offload_device)
                 mm.soft_empty_cache()
         elif clip_l is not None:
             clip_l.cond_stage_model.to(device)
-            tokens = clip_l.tokenize(prompt, return_word_ids=True)
+            tokens = clip_l.tokenize(prompt if clip_text_override is None else clip_text_override, return_word_ids=True)
             prompt_embeds_2 = clip_l.encode_from_tokens(tokens, return_pooled=True, return_dict=False)[1]
             prompt_embeds_2 = prompt_embeds_2.to(device=device)
 
