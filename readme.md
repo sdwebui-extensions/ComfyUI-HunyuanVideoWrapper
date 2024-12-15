@@ -6,7 +6,7 @@
 
 NOTE: 
   - Minimum 20GB Vram required (VLM qualtization not implemented yet)
-  - This changes the original nodes behavior by @kijai quite a bit. So if you want to test this feature, please repoint your git to this branch and pull the updates, or simply delete the original repo and pull this one， before the PR got merged it the Kijai's repo.
+  - This changes the original nodes behavior by @kijai quite a bit. So if you want to test this feature, please repoint your git to this branch and pull the updates, or simply delete the original repo and clone this one, before the PR got merged in the Kijai's repo.
 
 
 Now you can feed image to the VLM as condition of generations! This is different from image2video where the image become the first frame of the video. IP2V uses image as a part of the prompt, to extract the concept and style of the image.
