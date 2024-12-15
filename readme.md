@@ -13,7 +13,7 @@ So - very much like IPAdapter - but VLM will do the heavy lifting for you!
 Now this is a tuning free approach but with further task specific tuning we can expand the use scenarios.
 
 <img src="examples/ip2v/example_input.png" height=256></img>
-<img src="examples/ip2v/example_output_with_workflow.jpg" height=256></img>
+<img src="examples/ip2v/example_output_with_workflow.png" height=256></img>
 ----
 
 # Guide to Using `xtuner/llava-llama-3-8b-v1_1-transformers` for Image-Text Tasks
