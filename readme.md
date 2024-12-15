@@ -34,7 +34,7 @@ Set the `lm_type` to `vision_language`.
 
 ## Step 3: Load and Connect Image
 - Use the comfy native node to load the image.
-- Connect the loaded image to the `Hunyuan TextEncode` node.
+- Connect the loaded image to the `Hunyuan TextImageEncode` node.
   - You can connect up to 2 images to this node.
 
 ## Step 4: Prompting with Images
