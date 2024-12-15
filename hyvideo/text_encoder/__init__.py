@@ -274,7 +274,6 @@ class TextEncoder(nn.Module):
         hidden_state_skip_layer=None,
         return_texts=False,
         prompt_template=None,
-        image_token_strategy="text_only",
         image_token_selection_expr="::4",
         device=None,
     ):
