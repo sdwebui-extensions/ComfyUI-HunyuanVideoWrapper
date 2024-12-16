@@ -1,6 +1,61 @@
 # ComfyUI wrapper nodes for [HunyuanVideo](https://github.com/Tencent/HunyuanVideo)
 
-## WORK IN PROGRESS
+
+# Experimental IP2V - Image Prompting to Video via VLM by @Dango233
+## WORK IN PROGRESS - But it should work now!
+
+NOTE: 
+  - Minimum 20GB Vram required (VLM qualtization not implemented yet)
+  - This changes the original nodes behavior by @kijai quite a bit. So if you want to test this feature, please repoint your git to this branch and pull the updates, or simply delete the original repo and clone this one, before the PR got merged in the Kijai's repo.
+
+
+Now you can feed image to the VLM as condition of generations! This is different from image2video where the image become the first frame of the video. IP2V uses image as a part of the prompt, to extract the concept and style of the image.
+So - very much like IPAdapter - but VLM will do the heavy lifting for you!
+
+Now this is a tuning free approach but with further task specific tuning we can expand the use scenarios.
+
+<img src="examples/ip2v/example_input.png" height=256></img>
+<img src="examples/ip2v/example_output_with_workflow.png" height=256></img>
+----
+
+
+
+# Guide to Using `xtuner/llava-llama-3-8b-v1_1-transformers` for Image-Text Tasks
+
+## Step 1: Model Selection
+Use the original `xtuner/llava-llama-3-8b-v1_1-transformers` model which includes the vision tower. You have two options:
+- Download the model and place it in the `models/LLM` folder.
+- Rely on the auto-download mechanism.
+
+**Note:** It's recommended to offload the text encoder since the vision tower requires additional VRAM.
+
+## Step 2: Set Model Type
+Set the `lm_type` to `vision_language`.
+
+## Step 3: Load and Connect Image
+- Use the comfy native node to load the image.
+- Connect the loaded image to the `Hunyuan TextImageEncode` node.
+  - You can connect up to 2 images to this node.
+
+## Step 4: Prompting with Images
+- Reference the image in your prompt by including `<image>`.
+- The number of `<image>` tags should match the number of images provided to the sampler.
+  - Example prompt: `Describe this <image> in great detail.`
+
+You can also choose to give CLIP a prompt that does not reference the image separately.
+
+## Step 5: Advanced Configuration - `image_token_selection_expression`
+This expression is for advanced users and serves as a boolean mask to select which part of the image hidden state will be used for conditioning. Here are some details and recommendations:
+
+- The hidden state sequence length (or number of tokens) per image in llava-llama-3 is 576.
+- The default setting is `::4`, meaning every four tokens, one token goes into conditioning, interleaved, resulting in 144 tokens per image.
+- Generally, more tokens lean more towards the conditional image.
+- However, too many tokens (especially if the overall token count exceeds 256) will degrade generation quality. It's recommended not to use more than half the tokens (`::2`).
+- Interleaved tokens generally perform better, but you might also want to try the following expressions:
+  - `:128` - First 128 tokens.
+  - `-128:` - Last 128 tokens.
+  - `:128, -128:` - First 128 tokens and last 128 tokens.
+- With a proper prompting strategy, even not passing in any image tokens (leaving the expression blank) can yield decent effects.
 
 # Update
 
