@@ -151,6 +151,7 @@ class TextEncoder(nn.Module):
         self.reproduce = reproduce
         self.logger = logger
         self.is_fp8 = False
+        self.processor = None
 
         if "t5" in text_encoder_type:
             self.output_key = output_key or "last_hidden_state"
@@ -158,7 +159,8 @@ class TextEncoder(nn.Module):
             self.output_key = output_key or "pooler_output"
         elif "llm" in text_encoder_type or "glm" in text_encoder_type or "vlm" in text_encoder_type:
             self.output_key = output_key or "last_hidden_state"
-            self.processor = AutoProcessor.from_pretrained(text_encoder_path, device=device)
+            if "glm" in text_encoder_type or "vlm" in text_encoder_type:
+                self.processor = AutoProcessor.from_pretrained(text_encoder_path, device=device)
         else:
             raise ValueError(f"Unsupported text encoder type: {text_encoder_type}")
 
