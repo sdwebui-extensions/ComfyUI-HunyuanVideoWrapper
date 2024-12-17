@@ -110,7 +110,7 @@ class HyVideoInverseSampler:
             )
         if (num_frames - 1) % 4 != 0:
             raise ValueError(
-                f"`video_length-1` must be a multiple of 4, got {num_frames}"
+                 f"`video_length - 1 (that's minus one frame)` must be a multiple of 4, got {num_frames}"
             )
 
         log.info(
@@ -320,7 +320,7 @@ class HyVideoReSampler:
             )
         if (num_frames - 1) % 4 != 0:
             raise ValueError(
-                f"`video_length-1` must be a multiple of 4, got {num_frames}"
+                 f"`video_length - 1 (that's minus one frame)` must be a multiple of 4, got {num_frames}"
             )
 
         log.info(
@@ -498,7 +498,7 @@ class HyVideoPromptMixSampler:
             )
         if (num_frames - 1) % 4 != 0:
             raise ValueError(
-                f"`video_length-1` must be a multiple of 4, got {num_frames}"
+                 f"`video_length - 1 (that's minus one frame)` must be a multiple of 4, got {num_frames}"
             )
 
         log.info(

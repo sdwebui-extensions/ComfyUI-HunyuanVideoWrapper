@@ -175,11 +175,12 @@ class MMDoubleStreamBlock(nn.Module):
 
         # Apply RoPE if needed.
         if freqs_cis is not None:
-            img_qq, img_kk = apply_rotary_emb(img_q, img_k, freqs_cis, head_first=False)
-            assert (
-                img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
-            ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
-            img_q, img_k = img_qq, img_kk
+            img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, head_first=False)
+            #img_q, img_k = img_qq, img_kk
+            #assert (
+            #    img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
+            #), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
+            
 
         # Prepare txt for attention.
         txt_modulated = self.txt_norm1(txt)

@@ -1087,7 +1087,7 @@ class HyVideoSampler:
             )
         if (num_frames - 1) % 4 != 0:
             raise ValueError(
-                f"`video_length-1` must be a multiple of 4, got {num_frames}"
+                f"`video_length - 1 (that's minus one frame)` must be a multiple of 4, got {num_frames}"
             )
 
         log.info(
@@ -1101,6 +1101,8 @@ class HyVideoSampler:
             transformer, num_frames, target_height, target_width
         )
         n_tokens = freqs_cos.shape[0]
+        freqs_cos = freqs_cos.to(dtype).to(device)
+        freqs_sin = freqs_sin.to(dtype).to(device)
 
        
 
