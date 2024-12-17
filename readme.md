@@ -29,22 +29,19 @@ Use the original `xtuner/llava-llama-3-8b-v1_1-transformers` model which include
 
 **Note:** It's recommended to offload the text encoder since the vision tower requires additional VRAM.
 
-## Step 2: Set Model Type
-Set the `lm_type` to `vision_language`.
-
-## Step 3: Load and Connect Image
+## Step 2: Load and Connect Image
 - Use the comfy native node to load the image.
 - Connect the loaded image to the `Hunyuan TextImageEncode` node.
   - You can connect up to 2 images to this node.
 
-## Step 4: Prompting with Images
+## Step 3: Prompting with Images
 - Reference the image in your prompt by including `<image>`.
 - The number of `<image>` tags should match the number of images provided to the sampler.
   - Example prompt: `Describe this <image> in great detail.`
 
 You can also choose to give CLIP a prompt that does not reference the image separately.
 
-## Step 5: Advanced Configuration - `image_token_selection_expression`
+## Step 4: Advanced Configuration - `image_token_selection_expression`
 This expression is for advanced users and serves as a boolean mask to select which part of the image hidden state will be used for conditioning. Here are some details and recommendations:
 
 - The hidden state sequence length (or number of tokens) per image in llava-llama-3 is 576.
