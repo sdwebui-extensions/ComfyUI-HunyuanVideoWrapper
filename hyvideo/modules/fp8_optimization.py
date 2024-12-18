@@ -1,5 +1,4 @@
 import os
-
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -85,22 +84,18 @@ def convert_fp8_linear(module, original_dtype):
     script_directory = os.path.dirname(os.path.abspath(__file__))
 
     # loading fp8 mapping file
-    #fp8_map_path = dit_weight_path.replace('.pt', '_map.pt')
     fp8_map_path = os.path.join(script_directory,"fp8_map.safetensors")
     if os.path.exists(fp8_map_path):
-        #fp8_map = torch.load(fp8_map_path, map_location=lambda storage, loc: storage)
-        fp8_map = load_torch_file(fp8_map_path)
+        fp8_map = load_torch_file(fp8_map_path, safe_load=True)
     else:
         raise ValueError(f"Invalid fp8_map path: {fp8_map_path}.")
 
-    fp8_layers = []
+    #fp8_layers = []
     for key, layer in module.named_modules():
         if isinstance(layer, nn.Linear) and ('double_blocks' in key or 'single_blocks' in key):
-            fp8_layers.append(key)
+            #fp8_layers.append(key)
             original_forward = layer.forward
-            layer.weight = torch.nn.Parameter(layer.weight.to(torch.float8_e4m3fn))
+            #layer.weight = torch.nn.Parameter(layer.weight.to(torch.float8_e4m3fn))
             setattr(layer, "fp8_scale", fp8_map[key].to(dtype=original_dtype))
             setattr(layer, "original_forward", original_forward)
             setattr(layer, "forward", lambda input, m=layer: fp8_linear_forward(m, original_dtype, input))
-    
-

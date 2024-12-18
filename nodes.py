@@ -280,7 +280,7 @@ class HyVideoModelLoader:
         base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[base_precision]
 
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
-        sd = load_torch_file(model_path, device=transformer_load_device)
+        sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
 
         in_channels = out_channels = 16
         factor_kwargs = {"device": transformer_load_device, "dtype": base_dtype}
@@ -503,7 +503,7 @@ class HyVideoVAELoader:
         with open(os.path.join(script_directory, 'configs', 'hy_vae_config.json')) as f:
             vae_config = json.load(f)
         model_path = folder_paths.get_full_path("vae", model_name)
-        vae_sd = load_torch_file(model_path)
+        vae_sd = load_torch_file(model_path, safe_load=True)
 
         vae = AutoencoderKLCausal3D.from_config(vae_config)
         vae.load_state_dict(vae_sd)
@@ -1010,7 +1010,7 @@ class HyVideoTextEmbedsLoad:
 
     def load(self, embeds):
         embed_path = folder_paths.get_full_path_or_raise("hyvid_embeds", embeds)
-        loaded_tensors = load_torch_file(embed_path)
+        loaded_tensors = load_torch_file(embed_path, safe_load=True)
         # Reconstruct original dictionary with None for missing keys
         prompt_embeds_dict = {
             "prompt_embeds": loaded_tensors.get("prompt_embeds", None),
