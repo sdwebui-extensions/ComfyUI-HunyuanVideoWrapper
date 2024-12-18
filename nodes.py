@@ -239,7 +239,7 @@ class HyVideoModelLoader:
                 "model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
 
             "base_precision": (["fp32", "bf16"], {"default": "bf16"}),
-            "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6", "torchao_int4", "torchao_int8"], {"default": 'disabled', "tooltip": "optional quantization method"}),
+            "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_scaled', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6", "torchao_int4", "torchao_int8"], {"default": 'disabled', "tooltip": "optional quantization method"}),
             "load_device": (["main_device", "offload_device"], {"default": "main_device"}),
             },
             "optional": {
@@ -324,7 +324,7 @@ class HyVideoModelLoader:
 
         if not "torchao" in quantization:
             log.info("Using accelerate to load and assign model weights to device...")
-            if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast":
+            if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast" or quantization == "fp8_scaled":
                 dtype = torch.float8_e4m3fn
             else:
                 dtype = base_dtype
@@ -363,6 +363,9 @@ class HyVideoModelLoader:
             if quantization == "fp8_e4m3fn_fast":
                 from .fp8_optimization import convert_fp8_linear
                 convert_fp8_linear(patcher.model.diffusion_model, base_dtype, params_to_keep=params_to_keep)
+            elif quantization == "fp8_scaled":
+                from .hyvideo.modules.fp8_optimization import convert_fp8_linear
+                convert_fp8_linear(patcher.model.diffusion_model, base_dtype)
 
             #compile
             if compile_args is not None:
