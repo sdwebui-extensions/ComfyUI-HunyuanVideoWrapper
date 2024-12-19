@@ -690,17 +690,17 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                         ))
                     for c in context_queue:
                         partial_latent_model_input = latent_model_input[:, :, c, :, :]
-                        print("partial_latent_model_input", partial_latent_model_input.shape)
+                        #print("partial_latent_model_input", partial_latent_model_input.shape)
                         with torch.autocast(
                         device_type="cuda", dtype=self.base_dtype, enabled=True):
-                            noise_pred[:, :, c, :, :] += self.transformer(  # For an input image (129, 192, 336) (1, 256, 256)
-                                partial_latent_model_input,  # [2, 16, 33, 24, 42]
-                                t_expand,  # [2]
-                                text_states=input_prompt_embeds,  # [2, 256, 4096]
-                                text_mask=input_prompt_mask,  # [2, 256]
-                                text_states_2=input_prompt_embeds_2,  # [2, 768]
-                                freqs_cos=freqs_cos,  # [seqlen, head_dim]
-                                freqs_sin=freqs_sin,  # [seqlen, head_dim]
+                            noise_pred[:, :, c, :, :] += self.transformer(
+                                partial_latent_model_input, 
+                                t_expand,
+                                text_states=input_prompt_embeds,
+                                text_mask=input_prompt_mask,
+                                text_states_2=input_prompt_embeds_2,
+                                freqs_cos=freqs_cos,
+                                freqs_sin=freqs_sin,
                                 guidance=guidance_expand,
                                 stg_block_idx=stg_block_idx,
                                 stg_mode=stg_mode,
