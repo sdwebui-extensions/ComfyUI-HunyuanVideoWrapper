@@ -9,7 +9,7 @@ So - very much like IPAdapter - but VLM will do the heavy lifting for you!
 
 Now this is a tuning free approach but with further task specific tuning we can expand the use scenarios.
 
-# Guide to Using `xtuner/llava-llama-3-8b-v1_1-transformers` for Image-Text Tasks
+## Guide to Using `xtuner/llava-llama-3-8b-v1_1-transformers` for Image-Text Tasks
 
 ## Step 1: Model Selection
 Use the original `xtuner/llava-llama-3-8b-v1_1-transformers` model which includes the vision tower. You have two options:
