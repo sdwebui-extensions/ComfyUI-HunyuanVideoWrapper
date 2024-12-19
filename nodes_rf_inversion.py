@@ -4,10 +4,9 @@ import gc
 import os
 from .utils import log, print_memory
 
-from .hyvideo.utils.data_utils import align_to
 from diffusers.utils.torch_utils import randn_tensor
 import comfy.model_management as mm
-from .nodes import get_rotary_pos_embed
+from .hyvideo.diffusion.pipelines.pipeline_hunyuan_video import get_rotary_pos_embed
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -117,7 +116,7 @@ class HyVideoInverseSampler:
             f"Input (height, width, video_length) = ({height}, {width}, {num_frames})"
         )
 
-        freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, num_frames, height, width)
+        freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_num_frames, height, width)
 
         pipeline.scheduler.shift = flow_shift
   
@@ -327,7 +326,7 @@ class HyVideoReSampler:
             f"Input (height, width, video_length) = ({height}, {width}, {num_frames})"
         )
 
-        freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, num_frames, height, width)
+        freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_num_frames, height, width)
 
         pipeline.scheduler.shift = flow_shift
   
@@ -505,7 +504,7 @@ class HyVideoPromptMixSampler:
             f"Input (height, width, video_length) = ({height}, {width}, {num_frames})"
         )
         latent_video_length = (num_frames - 1) // 4 + 1
-        freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, num_frames, height, width)
+        freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_video_length, height, width)
 
         pipeline.scheduler.shift = flow_shift
   

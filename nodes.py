@@ -9,7 +9,6 @@ from typing import List, Dict, Any, Tuple
 from .hyvideo.constants import PROMPT_TEMPLATE
 from .hyvideo.text_encoder import TextEncoder
 from .hyvideo.utils.data_utils import align_to
-from .hyvideo.modules.posemb_layers import get_nd_rotary_pos_embed
 from .hyvideo.diffusion.schedulers import FlowMatchDiscreteScheduler
 from .hyvideo.diffusion.pipelines import HunyuanVideoPipeline
 from .hyvideo.vae.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
@@ -26,54 +25,6 @@ import comfy.model_base
 import comfy.latent_formats
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
-
-def get_rotary_pos_embed(transformer, video_length, height, width):
-        target_ndim = 3
-        ndim = 5 - 2
-        rope_theta = 225
-        patch_size = transformer.patch_size
-        rope_dim_list = transformer.rope_dim_list
-        hidden_size = transformer.hidden_size
-        heads_num = transformer.heads_num
-        head_dim = hidden_size // heads_num
-
-        # 884
-        latents_size = [(video_length - 1) // 4 + 1, height // 8, width // 8]
-
-        if isinstance(patch_size, int):
-            assert all(s % patch_size == 0 for s in latents_size), (
-                f"Latent size(last {ndim} dimensions) should be divisible by patch size({patch_size}), "
-                f"but got {latents_size}."
-            )
-            rope_sizes = [s // patch_size for s in latents_size]
-        elif isinstance(patch_size, list):
-            assert all(
-                s % patch_size[idx] == 0
-                for idx, s in enumerate(latents_size)
-            ), (
-                f"Latent size(last {ndim} dimensions) should be divisible by patch size({patch_size}), "
-                f"but got {latents_size}."
-            )
-            rope_sizes = [
-                s // patch_size[idx] for idx, s in enumerate(latents_size)
-            ]
-
-        if len(rope_sizes) != target_ndim:
-            rope_sizes = [1] * (target_ndim - len(rope_sizes)) + rope_sizes  # time axis
-
-        if rope_dim_list is None:
-            rope_dim_list = [head_dim // target_ndim for _ in range(target_ndim)]
-        assert (
-            sum(rope_dim_list) == head_dim
-        ), "sum(rope_dim_list) should equal to head_dim of attention layer"
-        freqs_cos, freqs_sin = get_nd_rotary_pos_embed(
-            rope_dim_list,
-            rope_sizes,
-            theta=rope_theta,
-            use_real=True,
-            theta_rescale_factor=1,
-        )
-        return freqs_cos, freqs_sin
 
 def filter_state_dict_by_blocks(state_dict, blocks_mapping):
     filtered_dict = {}
@@ -1027,7 +978,35 @@ class HyVideoTextEmbedsLoad:
         }
         
         return (prompt_embeds_dict,)
+    
+class HyVideoContextOptions:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "context_schedule": (["uniform_standard", "uniform_looped", "static_standard"],),
+            "context_frames": ("INT", {"default": 65, "min": 2, "max": 1000, "step": 1, "tooltip": "Number of pixel frames in the context, NOTE: the latent space has 4 frames in 1"} ),
+            "context_stride": ("INT", {"default": 4, "min": 4, "max": 100, "step": 1, "tooltip": "Context stride as pixel frames, NOTE: the latent space has 4 frames in 1"} ),
+            "context_overlap": ("INT", {"default": 4, "min": 4, "max": 100, "step": 1, "tooltip": "Context overlap as pixel frames, NOTE: the latent space has 4 frames in 1"} ),
+            "freenoise": ("BOOLEAN", {"default": True, "tooltip": "Shuffle the noise"}),
+            }
+        }
 
+    RETURN_TYPES = ("COGCONTEXT", )
+    RETURN_NAMES = ("context_options",)
+    FUNCTION = "process"
+    CATEGORY = "CogVideoWrapper"
+    DESCRIPTION = "Context options for HunyuanVideo, allows splitting the video into context windows and attemps blending them for longer generations than the model and memory otherwise would allow."
+
+    def process(self, context_schedule, context_frames, context_stride, context_overlap, freenoise):
+        context_options = {
+            "context_schedule":context_schedule,
+            "context_frames":context_frames,
+            "context_stride":context_stride,
+            "context_overlap":context_overlap,
+            "freenoise":freenoise
+        }
+
+        return (context_options,)
 #region Sampler
 class HyVideoSampler:
     @classmethod
@@ -1050,6 +1029,7 @@ class HyVideoSampler:
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "stg_args": ("STGARGS", ),
+                "context_options": ("COGCONTEXT", ),
             }
         }
 
@@ -1058,7 +1038,8 @@ class HyVideoSampler:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, samples=None, denoise_strength=1.0, force_offload=True, stg_args=None):
+    def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
+                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1099,15 +1080,6 @@ class HyVideoSampler:
 
         target_height = align_to(height, 16)
         target_width = align_to(width, 16)
-
-        freqs_cos, freqs_sin = get_rotary_pos_embed(
-            transformer, num_frames, target_height, target_width
-        )
-        n_tokens = freqs_cos.shape[0]
-        freqs_cos = freqs_cos.to(dtype).to(device)
-        freqs_sin = freqs_sin.to(dtype).to(device)
-
-       
 
         model["pipe"].scheduler.shift = flow_shift
 
@@ -1150,13 +1122,12 @@ class HyVideoSampler:
             denoise_strength=denoise_strength,
             prompt_embed_dict=hyvid_embeds,
             generator=generator,
-            freqs_cis=(freqs_cos, freqs_sin),
-            n_tokens=n_tokens,
             stg_mode=stg_args["stg_mode"] if stg_args is not None else None,
             stg_block_idx=stg_args["stg_block_idx"] if stg_args is not None else -1,
             stg_scale=stg_args["stg_scale"] if stg_args is not None else 0.0,
             stg_start_percent=stg_args["stg_start_percent"] if stg_args is not None else 0.0,
             stg_end_percent=stg_args["stg_end_percent"] if stg_args is not None else 1.0,
+            context_options=context_options,
         )
 
         print_memory(device)
@@ -1403,6 +1374,7 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoLoraBlockEdit": HyVideoLoraBlockEdit,
     "HyVideoTextEmbedsSave": HyVideoTextEmbedsSave,
     "HyVideoTextEmbedsLoad": HyVideoTextEmbedsLoad,
+    "HyVideoContextOptions": HyVideoContextOptions,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1423,4 +1395,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoLoraBlockEdit": "HunyuanVideo Lora Block Edit",
     "HyVideoTextEmbedsSave": "HunyuanVideo TextEmbeds Save",
     "HyVideoTextEmbedsLoad": "HunyuanVideo TextEmbeds Load",
+    "HyVideoContextOptions": "HunyuanVideo Context Options",
     }
