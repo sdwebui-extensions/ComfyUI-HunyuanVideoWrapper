@@ -307,7 +307,7 @@ class HyVideoModelLoader:
 
                     patcher, _ = load_lora_for_models(patcher, None, lora_sd, lora_strength, 0)
 
-            comfy.model_management.load_model_gpu(patcher)
+            comfy.model_management.load_models_gpu([patcher], force_full_load=True, force_patch_weights=True)
             if load_device == "offload_device":
                 patcher.model.diffusion_model.to(offload_device)
 
