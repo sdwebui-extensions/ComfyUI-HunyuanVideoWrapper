@@ -16,7 +16,8 @@ from .posemb_layers import apply_rotary_emb
 from .mlp_layers import MLP, MLPEmbedder, FinalLayer
 from .modulate_layers import ModulateDiT, modulate, apply_gate
 from .token_refiner import SingleTokenRefiner
-import comfy.model_management as mm
+from ...enhance_a_video.enhance import get_feta_scores
+from ...enhance_a_video.globals import is_enhance_enabled_single, is_enhance_enabled_double, set_num_frames
 
 class MMDoubleStreamBlock(nn.Module):
     """
@@ -176,12 +177,7 @@ class MMDoubleStreamBlock(nn.Module):
         # Apply RoPE if needed.
         if freqs_cis is not None:
             img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, head_first=False)
-            #img_q, img_k = img_qq, img_kk
-            #assert (
-            #    img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
-            #), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
             
-
         # Prepare txt for attention.
         txt_modulated = self.txt_norm1(txt)
         txt_modulated = modulate(
@@ -196,13 +192,14 @@ class MMDoubleStreamBlock(nn.Module):
         txt_q = self.txt_attn_q_norm(txt_q).to(txt_v)
         txt_k = self.txt_attn_k_norm(txt_k).to(txt_v)
 
+        if is_enhance_enabled_double():
+            feta_scores = get_feta_scores(img_q, img_k)
+
         # Run actual attention.
         q = torch.cat((img_q, txt_q), dim=1)
         k = torch.cat((img_k, txt_k), dim=1)
         v = torch.cat((img_v, txt_v), dim=1)
-        #assert (
-        #    cu_seqlens_q.shape[0] == 2 * img.shape[0] + 1
-        #), f"cu_seqlens_q.shape:{cu_seqlens_q.shape}, img.shape[0]:{img.shape[0]}"
+
         attn = attention(
             q,
             k,
@@ -218,6 +215,8 @@ class MMDoubleStreamBlock(nn.Module):
         )
 
         img_attn, txt_attn = attn[:, : img.shape[1]], attn[:, img.shape[1] :]
+        if is_enhance_enabled_double():
+            img_attn *= feta_scores
 
         # Calculate the img bloks.
         img = img + apply_gate(self.img_attn_proj(img_attn), gate=img_mod1_gate)
@@ -346,13 +345,15 @@ class MMSingleStreamBlock(nn.Module):
         if freqs_cis is not None:
             img_q, txt_q = q[:, :-txt_len, :, :], q[:, -txt_len:, :, :]
             img_k, txt_k = k[:, :-txt_len, :, :], k[:, -txt_len:, :, :]
-            img_qq, img_kk = apply_rotary_emb(img_q, img_k, freqs_cis, head_first=False)
-            assert (
-                img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
-            ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
-            img_q, img_k = img_qq, img_kk
+            img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, head_first=False)
+            # assert (
+            #     img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
+            # ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
             q = torch.cat((img_q, txt_q), dim=1)
             k = torch.cat((img_k, txt_k), dim=1)
+
+        if is_enhance_enabled_single():
+            feta_scores = get_feta_scores(img_q, img_k)
 
         # Compute attention.
         #assert (
@@ -411,10 +412,15 @@ class MMSingleStreamBlock(nn.Module):
                 batch_size=x.shape[0],
                 attn_mask=attn_mask
             )
-
+            if is_enhance_enabled_single():
+                attn *= feta_scores
+        
             # Compute activation in mlp stream, cat again and run second linear layer.
             output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
-            return x + apply_gate(output, gate=mod_gate)
+            output = x + apply_gate(output, gate=mod_gate)
+
+            
+            return output
 
 
 class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
@@ -673,6 +679,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
             oh // self.patch_size[1],
             ow // self.patch_size[2],
         )
+        set_num_frames(img.shape[2])
 
         # Prepare modulation vectors.
         vec = self.time_in(t)

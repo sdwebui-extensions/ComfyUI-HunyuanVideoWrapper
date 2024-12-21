@@ -132,6 +132,27 @@ class HyVideoBlockSwap:
 
     def setargs(self, **kwargs):
         return (kwargs, )
+    
+class HyVideoEnhanceAVideo:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "weight": ("FLOAT", {"default": 2.0, "min": 0, "max": 100, "step": 0.01, "tooltip": "The feta Weight of the Enhance-A-Video"}),
+                "single_blocks": ("BOOLEAN", {"default": False, "tooltip": "Enable Enhance-A-Video for single blocks"}),
+                "double_blocks": ("BOOLEAN", {"default": False, "tooltip": "Enable Enhance-A-Video for double blocks"}),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percentage of the steps to apply Enhance-A-Video"}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percentage of the steps to apply Enhance-A-Video"}),
+            },
+        }
+    RETURN_TYPES = ("FETAARGS",)
+    RETURN_NAMES = ("feta_args",)
+    FUNCTION = "setargs"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "https://github.com/NUS-HPC-AI-Lab/Enhance-A-Video"
+
+    def setargs(self, **kwargs):
+        return (kwargs, )
 
 class HyVideoSTG:
     @classmethod
@@ -1020,7 +1041,7 @@ class HyVideoSampler:
                 "num_frames": ("INT", {"default": 49, "min": 1, "max": 1024, "step": 4}),
                 "steps": ("INT", {"default": 30, "min": 1}),
                 "embedded_guidance_scale": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.01}),
-                "flow_shift": ("FLOAT", {"default": 9.0, "min": 0.0, "max": 30.0, "step": 0.01}),
+                "flow_shift": ("FLOAT", {"default": 9.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "force_offload": ("BOOLEAN", {"default": True}),
 
@@ -1030,6 +1051,7 @@ class HyVideoSampler:
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "stg_args": ("STGARGS", ),
                 "context_options": ("COGCONTEXT", ),
+                "feta_args": ("FETAARGS", ),
             }
         }
 
@@ -1039,7 +1061,7 @@ class HyVideoSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
-                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None):
+                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1128,6 +1150,7 @@ class HyVideoSampler:
             stg_start_percent=stg_args["stg_start_percent"] if stg_args is not None else 0.0,
             stg_end_percent=stg_args["stg_end_percent"] if stg_args is not None else 1.0,
             context_options=context_options,
+            feta_args=feta_args,
         )
 
         print_memory(device)
@@ -1375,6 +1398,7 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoTextEmbedsSave": HyVideoTextEmbedsSave,
     "HyVideoTextEmbedsLoad": HyVideoTextEmbedsLoad,
     "HyVideoContextOptions": HyVideoContextOptions,
+    "HyVideoEnhanceAVideo": HyVideoEnhanceAVideo,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1396,4 +1420,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoTextEmbedsSave": "HunyuanVideo TextEmbeds Save",
     "HyVideoTextEmbedsLoad": "HunyuanVideo TextEmbeds Load",
     "HyVideoContextOptions": "HunyuanVideo Context Options",
+    "HyVideoEnhanceAVideo": "HunyuanVideo Enhance A Video",
     }

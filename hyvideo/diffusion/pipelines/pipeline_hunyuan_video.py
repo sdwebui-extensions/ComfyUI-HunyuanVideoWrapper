@@ -37,6 +37,7 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 EXAMPLE_DOC_STRING = """"""
 from ...modules.posemb_layers import get_nd_rotary_pos_embed
+from ....enhance_a_video.globals import enable_enhance, disable_enhance, set_enhance_weight
 
 def get_rotary_pos_embed(transformer, latent_video_length, height, width):
         target_ndim = 3
@@ -416,6 +417,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         stg_start_percent: Optional[float] = 0.0,
         stg_end_percent: Optional[float] = 1.0,
         context_options: Optional[Dict[str, Any]] = None,
+        feta_args: Optional[Dict] = None,
         **kwargs,
     ):
         r"""
@@ -556,10 +558,16 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             **extra_set_timesteps_kwargs,
         )
 
-        #if "884" in vae_ver:
+        
         latent_video_length = (video_length - 1) // 4 + 1
-        # elif "888" in vae_ver:
-        #     video_length = (video_length - 1) // 8 + 1
+        if feta_args is not None:
+            set_enhance_weight(feta_args["weight"])
+            feta_start_percent = feta_args["start_percent"]
+            feta_end_percent = feta_args["end_percent"]
+            enable_enhance(feta_args["single_blocks"], feta_args["double_blocks"])
+        else:
+            disable_enhance()
+        
 
         #  context windows
         use_context_schedule = False
@@ -667,6 +675,12 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                             input_prompt_embeds = prompt_embeds[1].unsqueeze(0)
                             input_prompt_mask = prompt_mask[1].unsqueeze(0)
                             input_prompt_embeds_2 = prompt_embeds_2[1].unsqueeze(0)
+                
+                if feta_args is not None:
+                    if feta_start_percent <= current_step_percentage <= feta_end_percent:
+                        enable_enhance(feta_args["single_blocks"], feta_args["double_blocks"])
+                    else:
+                        disable_enhance()
 
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
