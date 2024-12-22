@@ -235,7 +235,7 @@ class HyVideoModelLoader:
     def loadmodel(self, model, base_precision, load_device,  quantization,
                   compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None):
         transformer = None
-        mm.unload_all_models()
+        #mm.unload_all_models()
         mm.soft_empty_cache()
         manual_offloading = True
         if "sage" in attention_mode:
@@ -328,7 +328,7 @@ class HyVideoModelLoader:
 
                     patcher, _ = load_lora_for_models(patcher, None, lora_sd, lora_strength, 0)
 
-            comfy.model_management.load_models_gpu([patcher], force_full_load=True, force_patch_weights=True)
+            comfy.model_management.load_models_gpu([patcher])
             if load_device == "offload_device":
                 patcher.model.diffusion_model.to(offload_device)
 
@@ -488,6 +488,7 @@ class HyVideoVAELoader:
         if compile_args is not None:
             torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
             vae = torch.compile(vae, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+            
 
         return (vae,)
 

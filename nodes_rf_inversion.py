@@ -7,6 +7,7 @@ from .utils import log, print_memory
 from diffusers.utils.torch_utils import randn_tensor
 import comfy.model_management as mm
 from .hyvideo.diffusion.pipelines.pipeline_hunyuan_video import get_rotary_pos_embed
+from .enhance_a_video.globals import enable_enhance, disable_enhance, set_enhance_weight
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -288,6 +289,7 @@ class HyVideoReSampler:
             },
             "optional": {
                 "interpolation_curve": ("FLOAT", {"forceInput": True, "tooltip": "The strength of the inversed latents along time, in latent space"}),
+                "feta_args": ("FETAARGS", ),
 
             }
         }
@@ -472,6 +474,7 @@ class HyVideoPromptMixSampler:
             },
             "optional": {
                 "interpolation_curve": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "forceInput": True, "tooltip": "The strength of the inversed latents along time, in latent space"}),
+                "feta_args": ("FETAARGS", ),
             }                
         }
 
@@ -482,7 +485,7 @@ class HyVideoPromptMixSampler:
     EXPERIMENTAL = True
 
     def process(self, model, width, height, num_frames, hyvid_embeds, hyvid_embeds_2, flow_shift, steps, embedded_guidance_scale, 
-                seed, force_offload, alpha, interpolation_curve=None):
+                seed, force_offload, alpha, interpolation_curve=None, feta_args=None):
         model = model.model
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -561,6 +564,14 @@ class HyVideoPromptMixSampler:
         latents_1 = latents.clone()
         latents_2 = latents.clone()
 
+        if feta_args is not None:
+            set_enhance_weight(feta_args["weight"])
+            feta_start_percent = feta_args["start_percent"]
+            feta_end_percent = feta_args["end_percent"]
+            enable_enhance(feta_args["single_blocks"], feta_args["double_blocks"])
+        else:
+            disable_enhance()
+
         # 7. Denoising loop
         self._num_timesteps = len(timesteps)
 
@@ -574,6 +585,13 @@ class HyVideoPromptMixSampler:
 
         with tqdm(total=len(timesteps)) as progress_bar:
             for idx, t in enumerate(timesteps):
+                current_step_percentage = idx / len(timesteps)
+
+                if feta_args is not None:
+                    if feta_start_percent <= current_step_percentage <= feta_end_percent:
+                        enable_enhance(feta_args["single_blocks"], feta_args["double_blocks"])
+                    else:
+                        disable_enhance()
 
                 # Pre-compute weighted latents
                 weighted_latents_1 = torch.zeros_like(latents_1)
