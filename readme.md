@@ -1,7 +1,29 @@
 # ComfyUI wrapper nodes for [HunyuanVideo](https://github.com/Tencent/HunyuanVideo)
 
+# Update 3:
 
-# Experimental IP2V - Image Prompting to Video via VLM by @Dango233
+It's been hectic couple of weeks with this model, I've lost track of what has happened since the start, but I'll try to present some of the more important updates:
+
+## Official scaled fp8 weights were released:
+
+https://huggingface.co/tencent/HunyuanVideo/blob/main/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states_fp8.pt
+
+Even if this file is .pt it's completely safe and it is loaded with weights_only, the scale map is included with the nodes. To use this model you have to use the `fp8_scaled` -quantization option in the model loader.
+The quality of these weights is much closer to the original bf16, downside is that they do not currently support fp8 fast mode, or LoRAs.
+
+## Almost free quality increase with [Enhance-A-Video](https://github.com/NUS-HPC-AI-Lab/Enhance-A-Video):
+
+This has a very slight hit on inference speed and zero hit on memory use, initial tests indicate it's absolutely worth using.
+
+![image](https://github.com/user-attachments/assets/68f0b5eb-aa23-49e1-a48f-fd3c4b1108ed)
+
+https://github.com/user-attachments/assets/e19b30e1-5f67-4e75-9c73-716d4569c319
+
+https://github.com/user-attachments/assets/083353a2-e9aa-43e9-a916-ff3af1d581c1
+
+
+
+# Update 2: Experimental IP2V - Image Prompting to Video via VLM by @Dango233
 ## WORK IN PROGRESS - But it should work now!
 
 Now you can feed image to the VLM as condition of generations! This is different from image2video where the image become the first frame of the video. IP2V uses image as a part of the prompt, to extract the concept and style of the image.
