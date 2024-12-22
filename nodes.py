@@ -139,8 +139,8 @@ class HyVideoEnhanceAVideo:
         return {
             "required": {
                 "weight": ("FLOAT", {"default": 2.0, "min": 0, "max": 100, "step": 0.01, "tooltip": "The feta Weight of the Enhance-A-Video"}),
-                "single_blocks": ("BOOLEAN", {"default": False, "tooltip": "Enable Enhance-A-Video for single blocks"}),
-                "double_blocks": ("BOOLEAN", {"default": False, "tooltip": "Enable Enhance-A-Video for double blocks"}),
+                "single_blocks": ("BOOLEAN", {"default": True, "tooltip": "Enable Enhance-A-Video for single blocks"}),
+                "double_blocks": ("BOOLEAN", {"default": True, "tooltip": "Enable Enhance-A-Video for double blocks"}),
                 "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percentage of the steps to apply Enhance-A-Video"}),
                 "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percentage of the steps to apply Enhance-A-Video"}),
             },

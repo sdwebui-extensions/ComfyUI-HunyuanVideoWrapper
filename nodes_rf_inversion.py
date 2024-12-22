@@ -370,6 +370,14 @@ class HyVideoReSampler:
         from .latent_preview import prepare_callback
         callback = prepare_callback(transformer, steps)
 
+        if feta_args is not None:
+            set_enhance_weight(feta_args["weight"])
+            feta_start_percent = feta_args["start_percent"]
+            feta_end_percent = feta_args["end_percent"]
+            enable_enhance(feta_args["single_blocks"], feta_args["double_blocks"])
+        else:
+            disable_enhance()
+
         from comfy.utils import ProgressBar
         from tqdm import tqdm
         log.info(f"Sampling {num_frames} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")
@@ -377,6 +385,14 @@ class HyVideoReSampler:
 
         with tqdm(total=len(timesteps)) as progress_bar:
              for idx, (t, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
+
+                current_step_percentage = idx / len(timesteps)
+
+                if feta_args is not None:
+                    if feta_start_percent <= current_step_percentage <= feta_end_percent:
+                        enable_enhance(feta_args["single_blocks"], feta_args["double_blocks"])
+                    else:
+                        disable_enhance()
 
                 latent_model_input = latents
 
