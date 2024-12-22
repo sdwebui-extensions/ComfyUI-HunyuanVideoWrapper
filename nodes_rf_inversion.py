@@ -300,7 +300,7 @@ class HyVideoReSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, 
-                samples, inversed_latents, force_offload, start_step, end_step, eta_base, eta_trend, interpolation_curve=None):
+                samples, inversed_latents, force_offload, start_step, end_step, eta_base, eta_trend, interpolation_curve=None, feta_args=None):
         model = model.model
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
