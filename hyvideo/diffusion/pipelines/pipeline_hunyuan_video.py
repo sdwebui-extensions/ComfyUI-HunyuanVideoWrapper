@@ -36,7 +36,56 @@ from comfy.utils import ProgressBar
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 EXAMPLE_DOC_STRING = """"""
+from ...modules.posemb_layers import get_nd_rotary_pos_embed
+from ....enhance_a_video.globals import enable_enhance, disable_enhance, set_enhance_weight
 
+def get_rotary_pos_embed(transformer, latent_video_length, height, width):
+        target_ndim = 3
+        ndim = 5 - 2
+        rope_theta = 225
+        patch_size = transformer.patch_size
+        rope_dim_list = transformer.rope_dim_list
+        hidden_size = transformer.hidden_size
+        heads_num = transformer.heads_num
+        head_dim = hidden_size // heads_num
+
+        # 884
+        latents_size = [latent_video_length, height // 8, width // 8]
+
+        if isinstance(patch_size, int):
+            assert all(s % patch_size == 0 for s in latents_size), (
+                f"Latent size(last {ndim} dimensions) should be divisible by patch size({patch_size}), "
+                f"but got {latents_size}."
+            )
+            rope_sizes = [s // patch_size for s in latents_size]
+        elif isinstance(patch_size, list):
+            assert all(
+                s % patch_size[idx] == 0
+                for idx, s in enumerate(latents_size)
+            ), (
+                f"Latent size(last {ndim} dimensions) should be divisible by patch size({patch_size}), "
+                f"but got {latents_size}."
+            )
+            rope_sizes = [
+                s // patch_size[idx] for idx, s in enumerate(latents_size)
+            ]
+
+        if len(rope_sizes) != target_ndim:
+            rope_sizes = [1] * (target_ndim - len(rope_sizes)) + rope_sizes  # time axis
+
+        if rope_dim_list is None:
+            rope_dim_list = [head_dim // target_ndim for _ in range(target_ndim)]
+        assert (
+            sum(rope_dim_list) == head_dim
+        ), "sum(rope_dim_list) should equal to head_dim of attention layer"
+        freqs_cos, freqs_sin = get_nd_rotary_pos_embed(
+            rope_dim_list,
+            rope_sizes,
+            theta=rope_theta,
+            use_real=True,
+            theta_rescale_factor=1,
+        )
+        return freqs_cos, freqs_sin
 def retrieve_timesteps(
     scheduler,
     num_inference_steps: Optional[int] = None,
@@ -183,6 +232,9 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         generator,
         latents=None,
         denoise_strength=1.0,
+        freenoise=False, 
+        context_size=None, 
+        context_overlap=None
     ):
         shape = (
             batch_size,
@@ -197,6 +249,40 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
         noise = randn_tensor(shape, generator=generator, device=device, dtype=self.base_dtype)
+        if freenoise:
+            logger.info("Applying FreeNoise")
+            # code and comments from AnimateDiff-Evolved by Kosinkadink (https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved)
+            #video_length = video_length // 4
+            delta = context_size - context_overlap
+            for start_idx in range(0, video_length-context_size, delta):
+                # start_idx corresponds to the beginning of a context window
+                # goal: place shuffled in the delta region right after the end of the context window
+                #       if space after context window is not enough to place the noise, adjust and finish
+                place_idx = start_idx + context_size
+                # if place_idx is outside the valid indexes, we are already finished
+                if place_idx >= video_length:
+                    break
+                end_idx = place_idx - 1
+                #print("video_length:", video_length, "start_idx:", start_idx, "end_idx:", end_idx, "place_idx:", place_idx, "delta:", delta)
+
+                # if there is not enough room to copy delta amount of indexes, copy limited amount and finish
+                if end_idx + delta >= video_length:
+                    final_delta = video_length - place_idx
+                    # generate list of indexes in final delta region
+                    list_idx = torch.tensor(list(range(start_idx,start_idx+final_delta)), device=torch.device("cpu"), dtype=torch.long)
+                    # shuffle list
+                    list_idx = list_idx[torch.randperm(final_delta, generator=generator)]
+                    # apply shuffled indexes
+                    noise[:, :, place_idx:place_idx + final_delta, :, :] = noise[:, :, list_idx, :, :]
+                    break
+                # otherwise, do normal behavior
+                # generate list of indexes in delta region
+                list_idx = torch.tensor(list(range(start_idx,start_idx+delta)), device=torch.device("cpu"), dtype=torch.long)
+                # shuffle list
+                list_idx = list_idx[torch.randperm(delta, generator=generator)]
+                # apply shuffled indexes
+                #print("place_idx:", place_idx, "delta:", delta, "list_idx:", list_idx)
+                noise[:, :, place_idx:place_idx + delta, :, :] = noise[:, :, list_idx, :, :]
         if latents is None:
             latents = noise
         else:
@@ -313,7 +399,6 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         denoise_strength: float = 1.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.Tensor] = None,
-        
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         guidance_rescale: float = 0.0,
         clip_skip: Optional[int] = None,
@@ -325,14 +410,14 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             ]
         ] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-        freqs_cis: Tuple[torch.Tensor, torch.Tensor] = None,
-        n_tokens: Optional[int] = None,
         embedded_guidance_scale: Optional[float] = None,
         stg_mode: Optional[str] = None,
         stg_block_idx: Optional[int] = -1,
         stg_scale: Optional[float] = 0.0,
         stg_start_percent: Optional[float] = 0.0,
         stg_end_percent: Optional[float] = 1.0,
+        context_options: Optional[Dict[str, Any]] = None,
+        feta_args: Optional[Dict] = None,
         **kwargs,
     ):
         r"""
@@ -460,7 +545,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
 
         # 4. Prepare timesteps
         extra_set_timesteps_kwargs = self.prepare_extra_func_kwargs(
-            self.scheduler.set_timesteps, {"n_tokens": n_tokens}
+            self.scheduler.set_timesteps, {}
         )
         if hasattr(self.scheduler, "set_begin_index") and denoise_strength == 1.0:
             self.scheduler.set_begin_index(begin_index=0)
@@ -473,10 +558,45 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             **extra_set_timesteps_kwargs,
         )
 
-        #if "884" in vae_ver:
+        
         latent_video_length = (video_length - 1) // 4 + 1
-        # elif "888" in vae_ver:
-        #     video_length = (video_length - 1) // 8 + 1
+        if feta_args is not None:
+            set_enhance_weight(feta_args["weight"])
+            feta_start_percent = feta_args["start_percent"]
+            feta_end_percent = feta_args["end_percent"]
+            enable_enhance(feta_args["single_blocks"], feta_args["double_blocks"])
+        else:
+            disable_enhance()
+        
+
+        #  context windows
+        use_context_schedule = False
+        freenoise = False
+        context_stride = 1
+        context_overlap = 1
+        context_frames = 65
+        if context_options is not None:
+            context_schedule = context_options["context_schedule"]
+            context_frames =  (context_options["context_frames"] - 1) // 4 + 1
+            context_stride = context_options["context_stride"] // 4
+            context_overlap = context_options["context_overlap"] // 4
+            freenoise = context_options["freenoise"]
+             
+            logger.info(f"Context schedule enabled: {context_frames} frames, {context_stride} stride, {context_overlap} overlap")
+            use_context_schedule = True
+            from ....context import get_context_scheduler
+            context = get_context_scheduler(context_schedule)
+            freqs_cos, freqs_sin = get_rotary_pos_embed(
+                self.transformer, context_frames, height, width
+            )
+        else:
+            # rotary embeddings
+            freqs_cos, freqs_sin = get_rotary_pos_embed(
+                self.transformer, latent_video_length, height, width
+            )
+        
+        freqs_cos = freqs_cos.to(self.base_dtype).to(device)
+        freqs_sin = freqs_sin.to(self.base_dtype).to(device)
         
 
         # 5. Prepare latent variables
@@ -493,6 +613,9 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             generator,
             latents,
             denoise_strength=denoise_strength,
+            freenoise=freenoise,
+            context_size=context_frames,
+            context_overlap=context_overlap
         )
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
@@ -552,10 +675,14 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                             input_prompt_embeds = prompt_embeds[1].unsqueeze(0)
                             input_prompt_mask = prompt_mask[1].unsqueeze(0)
                             input_prompt_embeds_2 = prompt_embeds_2[1].unsqueeze(0)
+                
+                if feta_args is not None:
+                    if feta_start_percent <= current_step_percentage <= feta_end_percent:
+                        enable_enhance(feta_args["single_blocks"], feta_args["double_blocks"])
+                    else:
+                        disable_enhance()
 
-                latent_model_input = self.scheduler.scale_model_input(
-                    latent_model_input, t
-                )
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 t_expand = t.repeat(latent_model_input.shape[0])
                 if embedded_guidance_scale is not None and not cfg_enabled:
@@ -568,44 +695,73 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                     )
                 else:
                     guidance_expand = None
-                
-                # predict the noise residual
-                with torch.autocast(
-                    device_type="cuda", dtype=self.base_dtype, enabled=True
-                ):
-                    noise_pred = self.transformer(  # For an input image (129, 192, 336) (1, 256, 256)
-                        latent_model_input,  # [2, 16, 33, 24, 42]
-                        t_expand,  # [2]
-                        text_states=input_prompt_embeds,  # [2, 256, 4096]
-                        text_mask=input_prompt_mask,  # [2, 256]
-                        text_states_2=input_prompt_embeds_2,  # [2, 768]
-                        freqs_cos=freqs_cis[0],  # [seqlen, head_dim]
-                        freqs_sin=freqs_cis[1],  # [seqlen, head_dim]
-                        guidance=guidance_expand,
-                        stg_block_idx=stg_block_idx,
-                        stg_mode=stg_mode,
-                        return_dict=True,
-                    )["x"]
 
-                # perform guidance
-                if cfg_enabled and not self.do_spatio_temporal_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (
-                        noise_pred_text - noise_pred_uncond
-                    )
-                elif self.do_classifier_free_guidance and self.do_spatio_temporal_guidance:
-                    raise NotImplementedError
-                    noise_pred_uncond, noise_pred_text, noise_pred_perturb = noise_pred.chunk(3)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (
-                        noise_pred_text - noise_pred_uncond
-                    ) + self._stg_scale * (
-                        noise_pred_text - noise_pred_perturb
-                    )
-                elif self.do_spatio_temporal_guidance and stg_enabled:
-                    noise_pred_text, noise_pred_perturb = noise_pred.chunk(2)
-                    noise_pred = noise_pred_text + self._stg_scale * (
-                        noise_pred_text - noise_pred_perturb
-                    )
+                if use_context_schedule:
+                    counter = torch.zeros_like(latent_model_input)
+                    noise_pred = torch.zeros_like(latent_model_input)
+                    context_queue = list(context(
+                            i, num_inference_steps, latents.shape[2], context_frames, context_stride, context_overlap,
+                        ))
+                    for c in context_queue:
+                        partial_latent_model_input = latent_model_input[:, :, c, :, :]
+                        #print("partial_latent_model_input", partial_latent_model_input.shape)
+                        with torch.autocast(
+                        device_type="cuda", dtype=self.base_dtype, enabled=True):
+                            noise_pred[:, :, c, :, :] += self.transformer(
+                                partial_latent_model_input, 
+                                t_expand,
+                                text_states=input_prompt_embeds,
+                                text_mask=input_prompt_mask,
+                                text_states_2=input_prompt_embeds_2,
+                                freqs_cos=freqs_cos,
+                                freqs_sin=freqs_sin,
+                                guidance=guidance_expand,
+                                stg_block_idx=stg_block_idx,
+                                stg_mode=stg_mode,
+                                return_dict=True,
+                            )["x"]
+
+                            counter[:, :, c, :, :] += 1
+                            noise_pred = noise_pred.float()
+                    noise_pred /= counter
+                else:
+                    # predict the noise residual
+                    with torch.autocast(
+                        device_type="cuda", dtype=self.base_dtype, enabled=True
+                    ):
+                        noise_pred = self.transformer(  # For an input image (129, 192, 336) (1, 256, 256)
+                            latent_model_input,  # [2, 16, 33, 24, 42]
+                            t_expand,  # [2]
+                            text_states=input_prompt_embeds,  # [2, 256, 4096]
+                            text_mask=input_prompt_mask,  # [2, 256]
+                            text_states_2=input_prompt_embeds_2,  # [2, 768]
+                            freqs_cos=freqs_cos,  # [seqlen, head_dim]
+                            freqs_sin=freqs_sin,  # [seqlen, head_dim]
+                            guidance=guidance_expand,
+                            stg_block_idx=stg_block_idx,
+                            stg_mode=stg_mode,
+                            return_dict=True,
+                        )["x"]
+
+                    # perform guidance
+                    if cfg_enabled and not self.do_spatio_temporal_guidance:
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        noise_pred = noise_pred_uncond + self.guidance_scale * (
+                            noise_pred_text - noise_pred_uncond
+                        )
+                    elif self.do_classifier_free_guidance and self.do_spatio_temporal_guidance:
+                        raise NotImplementedError
+                        noise_pred_uncond, noise_pred_text, noise_pred_perturb = noise_pred.chunk(3)
+                        noise_pred = noise_pred_uncond + self.guidance_scale * (
+                            noise_pred_text - noise_pred_uncond
+                        ) + self._stg_scale * (
+                            noise_pred_text - noise_pred_perturb
+                        )
+                    elif self.do_spatio_temporal_guidance and stg_enabled:
+                        noise_pred_text, noise_pred_perturb = noise_pred.chunk(2)
+                        noise_pred = noise_pred_text + self._stg_scale * (
+                            noise_pred_text - noise_pred_perturb
+                        )
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(

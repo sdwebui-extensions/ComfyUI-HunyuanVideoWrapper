@@ -1,6 +1,69 @@
 # ComfyUI wrapper nodes for [HunyuanVideo](https://github.com/Tencent/HunyuanVideo)
 
-## WORK IN PROGRESS
+# Update 3:
+
+It's been hectic couple of weeks with this model, I've lost track of what has happened since the start, but I'll try to present some of the more important updates:
+
+## Official scaled fp8 weights were released:
+
+https://huggingface.co/tencent/HunyuanVideo/blob/main/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states_fp8.pt
+
+Even if this file is .pt it's completely safe and it is loaded with weights_only, the scale map is included with the nodes. To use this model you have to use the `fp8_scaled` -quantization option in the model loader.
+The quality of these weights is much closer to the original bf16, downside is that they do not currently support fp8 fast mode, or LoRAs.
+
+## Almost free quality increase with [Enhance-A-Video](https://github.com/NUS-HPC-AI-Lab/Enhance-A-Video):
+
+This has a very slight hit on inference speed and zero hit on memory use, initial tests indicate it's absolutely worth using.
+
+![image](https://github.com/user-attachments/assets/68f0b5eb-aa23-49e1-a48f-fd3c4b1108ed)
+
+https://github.com/user-attachments/assets/e19b30e1-5f67-4e75-9c73-716d4569c319
+
+https://github.com/user-attachments/assets/083353a2-e9aa-43e9-a916-ff3af1d581c1
+
+
+
+# Update 2: Experimental IP2V - Image Prompting to Video via VLM by @Dango233
+## WORK IN PROGRESS - But it should work now!
+
+Now you can feed image to the VLM as condition of generations! This is different from image2video where the image become the first frame of the video. IP2V uses image as a part of the prompt, to extract the concept and style of the image.
+So - very much like IPAdapter - but VLM will do the heavy lifting for you!
+
+Now this is a tuning free approach but with further task specific tuning we can expand the use scenarios.
+
+## Guide to Using `xtuner/llava-llama-3-8b-v1_1-transformers` for Image-Text Tasks
+
+## Step 1: Model Selection
+Use the original `xtuner/llava-llama-3-8b-v1_1-transformers` model which includes the vision tower. You have two options:
+- Download the model and place it in the `models/LLM` folder.
+- Rely on the auto-download mechanism.
+
+**Note:** It's recommended to offload the text encoder since the vision tower requires additional VRAM.
+
+## Step 2: Load and Connect Image
+- Use the comfy native node to load the image.
+- Connect the loaded image to the `Hunyuan TextImageEncode` node.
+  - You can connect up to 2 images to this node.
+
+## Step 3: Prompting with Images
+- Reference the image in your prompt by including `<image>`.
+- The number of `<image>` tags should match the number of images provided to the sampler.
+  - Example prompt: `Describe this <image> in great detail.`
+
+You can also choose to give CLIP a prompt that does not reference the image separately.
+
+## Step 4: Advanced Configuration - `image_token_selection_expression`
+This expression is for advanced users and serves as a boolean mask to select which part of the image hidden state will be used for conditioning. Here are some details and recommendations:
+
+- The hidden state sequence length (or number of tokens) per image in llava-llama-3 is 576.
+- The default setting is `::4`, meaning every four tokens, one token goes into conditioning, interleaved, resulting in 144 tokens per image.
+- Generally, more tokens lean more towards the conditional image.
+- However, too many tokens (especially if the overall token count exceeds 256) will degrade generation quality. It's recommended not to use more than half the tokens (`::2`).
+- Interleaved tokens generally perform better, but you might also want to try the following expressions:
+  - `:128` - First 128 tokens.
+  - `-128:` - Last 128 tokens.
+  - `:128, -128:` - First 128 tokens and last 128 tokens.
+- With a proper prompting strategy, even not passing in any image tokens (leaving the expression blank) can yield decent effects.
 
 # Update
 

@@ -4,12 +4,13 @@ from copy import deepcopy
 
 import torch
 import torch.nn as nn
-from transformers import CLIPTextModel, CLIPTokenizer, AutoTokenizer, AutoModel
+from transformers import CLIPTextModel, CLIPTokenizer, AutoTokenizer, AutoModel, LlavaForConditionalGeneration, AutoProcessor
 from transformers.utils import ModelOutput
 
 from ..constants import TEXT_ENCODER_PATH, TOKENIZER_PATH
 from ..constants import PRECISION_TO_TYPE
-
+from ..utils.token_helper import find_subsequence, multi_slice_to_mask
+from PIL import Image
 
 def use_default(value, default):
     return value if value is not None else default
@@ -41,6 +42,12 @@ def load_text_encoder(
             quantization_config=quantization_config
         )
         text_encoder.final_layer_norm = text_encoder.norm
+    elif text_encoder_type == "vlm":
+        text_encoder = LlavaForConditionalGeneration.from_pretrained(
+            text_encoder_path, 
+            low_cpu_mem_usage=True,
+            quantization_config=quantization_config
+        )
     else:
         raise ValueError(f"Unsupported text encoder type: {text_encoder_type}")
     # from_pretrained will ensure that the model is in eval mode.
@@ -69,7 +76,7 @@ def load_tokenizer(
 
     if tokenizer_type == "clipL":
         tokenizer = CLIPTokenizer.from_pretrained(tokenizer_path, max_length=77)
-    elif tokenizer_type == "llm":
+    elif tokenizer_type == "llm" or tokenizer_type == "vlm":
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path, padding_side=padding_side
         )
@@ -144,13 +151,16 @@ class TextEncoder(nn.Module):
         self.reproduce = reproduce
         self.logger = logger
         self.is_fp8 = False
+        self.processor = None
 
         if "t5" in text_encoder_type:
             self.output_key = output_key or "last_hidden_state"
         elif "clip" in text_encoder_type:
             self.output_key = output_key or "pooler_output"
-        elif "llm" in text_encoder_type or "glm" in text_encoder_type:
+        elif "llm" in text_encoder_type or "glm" in text_encoder_type or "vlm" in text_encoder_type:
             self.output_key = output_key or "last_hidden_state"
+            if "glm" in text_encoder_type or "vlm" in text_encoder_type:
+                self.processor = AutoProcessor.from_pretrained(text_encoder_path, device=device)
         else:
             raise ValueError(f"Unsupported text encoder type: {text_encoder_type}")
 
@@ -193,15 +203,17 @@ class TextEncoder(nn.Module):
         else:
             raise TypeError(f"Unsupported template type: {type(template)}")
 
-    def text2tokens(self, text, prompt_template):
+    def text2tokens(self, text, prompt_template, image1=None, image2=None, clip_text_override=None):
         """
         Tokenize the input text.
 
         Args:
             text (str or list): Input text.
         """
+        if self.text_encoder_type != "vlm" and image1 is not None:
+            raise ValueError("Only vision_languague models support image input")
         tokenize_input_type = "str"
-        if prompt_template is not None and self.text_encoder_type == "llm":
+        if prompt_template is not None and self.text_encoder_type == "llm" or self.text_encoder_type == "vlm":
             if isinstance(text, (list, tuple)):
                 text = [
                     self.apply_text_to_template(one_text, prompt_template["template"])
@@ -215,21 +227,35 @@ class TextEncoder(nn.Module):
                     tokenize_input_type = "list"
             else:
                 raise TypeError(f"Unsupported text type: {type(text)}")
+        elif clip_text_override is not None and self.text_encoder_type == "clipL":
+            text = clip_text_override
 
         kwargs = dict(
             truncation=True,
             max_length=self.max_length,
-            padding="max_length",
+            padding="max_length" if self.text_encoder_type != "vlm" else "do_not_pad",
             return_tensors="pt",
         )
         if tokenize_input_type == "str":
-            return self.tokenizer(
+            text_tokens = self.tokenizer(
                 text,
                 return_length=False,
                 return_overflowing_tokens=False,
                 return_attention_mask=True,
                 **kwargs,
             )
+            if self.text_encoder_type == "vlm":
+                raw_images = []
+                if image1 is not None:
+                    raw_images.append(image1.squeeze(0)*255)
+                if image2 is not None:
+                    raw_images.append(image2.squeeze(0)*255)
+                text_tokens = self.processor(
+                    raw_images, 
+                    text, 
+                    **kwargs,
+                    ).to(0, torch.float16)
+            return text_tokens #text_tokens
         elif tokenize_input_type == "list":
             return self.tokenizer.apply_chat_template(
                 text,
@@ -250,6 +276,7 @@ class TextEncoder(nn.Module):
         hidden_state_skip_layer=None,
         return_texts=False,
         prompt_template=None,
+        image_token_selection_expr="::4",
         device=None,
     ):
         """
@@ -275,12 +302,14 @@ class TextEncoder(nn.Module):
         attention_mask = (
             batch_encoding["attention_mask"].to(device) if use_attention_mask else None
         )
+        for k,v in batch_encoding.items():
+            batch_encoding[k] = v.to(device) if isinstance(v, torch.Tensor) else v
         outputs = self.model(
-            input_ids=batch_encoding["input_ids"].to(device),
-            attention_mask=attention_mask,
+            **batch_encoding,
             output_hidden_states=output_hidden_states
             or hidden_state_skip_layer is not None,
         )
+
         if hidden_state_skip_layer is not None:
             last_hidden_state = outputs.hidden_states[-(hidden_state_skip_layer + 1)]
             # Real last hidden state already has layer norm applied. So here we only apply it
@@ -293,12 +322,49 @@ class TextEncoder(nn.Module):
         # Remove hidden states of instruction tokens, only keep prompt tokens.
         if prompt_template is not None and self.text_encoder_type == "llm":
             crop_start = prompt_template.get("crop_start", -1)
-
             if crop_start > 0:
                 last_hidden_state = last_hidden_state[:, crop_start:]
                 attention_mask = (
                     attention_mask[:, crop_start:] if use_attention_mask else None
                 )
+        elif prompt_template is not None and self.text_encoder_type == "vlm":
+            # Temporory implementation for one round chat template to get rid of system prompts aand chat header
+            user_start_tokens = self.tokenizer(
+                text="<|start_header_id|>user<|end_header_id|>",
+                add_special_tokens=False, 
+                return_tensors="pt"
+                )
+            image_token = self.tokenizer(
+                text="<image>",
+                add_special_tokens=False, 
+                return_tensors="pt"
+                )
+            image_token = image_token["input_ids"].to(device)
+            user_start_tokens["input_ids"] = user_start_tokens["input_ids"].to(device)
+            tk_idx, tk_n, tk_len = find_subsequence(batch_encoding["input_ids"], user_start_tokens["input_ids"])
+            if tk_n != 1:
+                raise ValueError("Template seems not in the required format, do you have <|start_header_id|>user<|end_header_id|> in place, and only one round of user input?")
+            user_tokens = batch_encoding["input_ids"][:,tk_idx[0]+tk_len:]
+            img_idx, img_n, _ = find_subsequence(user_tokens, image_token)
+            img_seq_len=outputs["image_hidden_states"].shape[1]
+            last_hidden_state = last_hidden_state[:, tk_idx[0]+tk_len:]
+            # create image_mask to subset non-image hidden state
+            seq_mask = torch.ones_like(last_hidden_state, device=device, dtype=torch.bool)
+            img_mask=torch.zeros_like(outputs["image_hidden_states"][0:1], device=device, dtype=torch.bool)
+            img_mask[:, multi_slice_to_mask(image_token_selection_expr, img_mask.shape[1])]=True
+                
+            drift=0  
+            for i in img_idx:
+                i = i+drift
+                seq_mask[:,i:i+img_seq_len,:] = img_mask
+                drift+=img_seq_len 
+            
+            last_hidden_state = last_hidden_state[seq_mask].view(1,-1,outputs["image_hidden_states"].shape[-1])
+
+            attention_mask = torch.ones(last_hidden_state.shape[0], last_hidden_state.shape[1], device=device, dtype=torch.int64)
+
+        elif prompt_template is None and self.text_encoder_type == "vlm":
+            raise ValueError("Vlm encoders must use compatiable chat template.")
 
         if output_hidden_states:
             return TextEncoderModelOutput(

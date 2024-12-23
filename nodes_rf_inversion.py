@@ -4,10 +4,10 @@ import gc
 import os
 from .utils import log, print_memory
 
-from .hyvideo.utils.data_utils import align_to
 from diffusers.utils.torch_utils import randn_tensor
 import comfy.model_management as mm
-from .nodes import get_rotary_pos_embed
+from .hyvideo.diffusion.pipelines.pipeline_hunyuan_video import get_rotary_pos_embed
+from .enhance_a_video.globals import enable_enhance, disable_enhance, set_enhance_weight
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -110,14 +110,14 @@ class HyVideoInverseSampler:
             )
         if (num_frames - 1) % 4 != 0:
             raise ValueError(
-                f"`video_length-1` must be a multiple of 4, got {num_frames}"
+                 f"`video_length - 1 (that's minus one frame)` must be a multiple of 4, got {num_frames}"
             )
 
         log.info(
             f"Input (height, width, video_length) = ({height}, {width}, {num_frames})"
         )
 
-        freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, num_frames, height, width)
+        freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_num_frames, height, width)
 
         pipeline.scheduler.shift = flow_shift
   
@@ -289,6 +289,7 @@ class HyVideoReSampler:
             },
             "optional": {
                 "interpolation_curve": ("FLOAT", {"forceInput": True, "tooltip": "The strength of the inversed latents along time, in latent space"}),
+                "feta_args": ("FETAARGS", ),
 
             }
         }
@@ -299,7 +300,7 @@ class HyVideoReSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, 
-                samples, inversed_latents, force_offload, start_step, end_step, eta_base, eta_trend, interpolation_curve=None):
+                samples, inversed_latents, force_offload, start_step, end_step, eta_base, eta_trend, interpolation_curve=None, feta_args=None):
         model = model.model
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -320,14 +321,14 @@ class HyVideoReSampler:
             )
         if (num_frames - 1) % 4 != 0:
             raise ValueError(
-                f"`video_length-1` must be a multiple of 4, got {num_frames}"
+                 f"`video_length - 1 (that's minus one frame)` must be a multiple of 4, got {num_frames}"
             )
 
         log.info(
             f"Input (height, width, video_length) = ({height}, {width}, {num_frames})"
         )
 
-        freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, num_frames, height, width)
+        freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_num_frames, height, width)
 
         pipeline.scheduler.shift = flow_shift
   
@@ -369,6 +370,14 @@ class HyVideoReSampler:
         from .latent_preview import prepare_callback
         callback = prepare_callback(transformer, steps)
 
+        if feta_args is not None:
+            set_enhance_weight(feta_args["weight"])
+            feta_start_percent = feta_args["start_percent"]
+            feta_end_percent = feta_args["end_percent"]
+            enable_enhance(feta_args["single_blocks"], feta_args["double_blocks"])
+        else:
+            disable_enhance()
+
         from comfy.utils import ProgressBar
         from tqdm import tqdm
         log.info(f"Sampling {num_frames} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")
@@ -376,6 +385,14 @@ class HyVideoReSampler:
 
         with tqdm(total=len(timesteps)) as progress_bar:
              for idx, (t, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
+
+                current_step_percentage = idx / len(timesteps)
+
+                if feta_args is not None:
+                    if feta_start_percent <= current_step_percentage <= feta_end_percent:
+                        enable_enhance(feta_args["single_blocks"], feta_args["double_blocks"])
+                    else:
+                        disable_enhance()
 
                 latent_model_input = latents
 
@@ -473,6 +490,7 @@ class HyVideoPromptMixSampler:
             },
             "optional": {
                 "interpolation_curve": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "forceInput": True, "tooltip": "The strength of the inversed latents along time, in latent space"}),
+                "feta_args": ("FETAARGS", ),
             }                
         }
 
@@ -483,7 +501,7 @@ class HyVideoPromptMixSampler:
     EXPERIMENTAL = True
 
     def process(self, model, width, height, num_frames, hyvid_embeds, hyvid_embeds_2, flow_shift, steps, embedded_guidance_scale, 
-                seed, force_offload, alpha, interpolation_curve=None):
+                seed, force_offload, alpha, interpolation_curve=None, feta_args=None):
         model = model.model
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -498,14 +516,14 @@ class HyVideoPromptMixSampler:
             )
         if (num_frames - 1) % 4 != 0:
             raise ValueError(
-                f"`video_length-1` must be a multiple of 4, got {num_frames}"
+                 f"`video_length - 1 (that's minus one frame)` must be a multiple of 4, got {num_frames}"
             )
 
         log.info(
             f"Input (height, width, video_length) = ({height}, {width}, {num_frames})"
         )
         latent_video_length = (num_frames - 1) // 4 + 1
-        freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, num_frames, height, width)
+        freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_video_length, height, width)
 
         pipeline.scheduler.shift = flow_shift
   
@@ -562,6 +580,14 @@ class HyVideoPromptMixSampler:
         latents_1 = latents.clone()
         latents_2 = latents.clone()
 
+        if feta_args is not None:
+            set_enhance_weight(feta_args["weight"])
+            feta_start_percent = feta_args["start_percent"]
+            feta_end_percent = feta_args["end_percent"]
+            enable_enhance(feta_args["single_blocks"], feta_args["double_blocks"])
+        else:
+            disable_enhance()
+
         # 7. Denoising loop
         self._num_timesteps = len(timesteps)
 
@@ -575,6 +601,13 @@ class HyVideoPromptMixSampler:
 
         with tqdm(total=len(timesteps)) as progress_bar:
             for idx, t in enumerate(timesteps):
+                current_step_percentage = idx / len(timesteps)
+
+                if feta_args is not None:
+                    if feta_start_percent <= current_step_percentage <= feta_end_percent:
+                        enable_enhance(feta_args["single_blocks"], feta_args["double_blocks"])
+                    else:
+                        disable_enhance()
 
                 # Pre-compute weighted latents
                 weighted_latents_1 = torch.zeros_like(latents_1)
