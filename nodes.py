@@ -444,7 +444,7 @@ class HyVideoModelLoader:
         patcher.model["manual_offloading"] = manual_offloading
         patcher.model["quantization"] = "disabled"
         patcher.model["block_swap_args"] = block_swap_args
-        patcher.model["auto_offload"] = auto_cpu_offload
+        patcher.model["auto_cpu_offload"] = auto_cpu_offload
 
         return (patcher,)
 
