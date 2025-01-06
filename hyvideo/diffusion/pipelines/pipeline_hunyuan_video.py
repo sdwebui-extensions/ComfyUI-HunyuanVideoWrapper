@@ -633,7 +633,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         from ....latent_preview import prepare_callback
         callback = prepare_callback(self.transformer, num_inference_steps)
 
-        print(self.scheduler.sigmas)
+        #print(self.scheduler.sigmas)
 
         
         logger.info(f"Sampling {video_length} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")

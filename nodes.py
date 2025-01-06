@@ -11,7 +11,9 @@ from .hyvideo.text_encoder import TextEncoder
 from .hyvideo.utils.data_utils import align_to
 from .hyvideo.diffusion.schedulers import FlowMatchDiscreteScheduler
 
-from .scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
+from .hyvideo.diffusion.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
+from .hyvideo.diffusion.schedulers.scheduling_sasolver import SASolverScheduler
+from. hyvideo.diffusion.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
 
 # from diffusers.schedulers import ( 
 #     DDIMScheduler, 
@@ -28,7 +30,10 @@ from .scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
 
 scheduler_mapping = {
     "FlowMatchDiscreteScheduler": FlowMatchDiscreteScheduler,
+    "SDE-DPMSolverMultistepScheduler": DPMSolverMultistepScheduler,
     "DPMSolverMultistepScheduler": DPMSolverMultistepScheduler,
+    "SASolverScheduler": SASolverScheduler,
+    "UniPCMultistepScheduler": UniPCMultistepScheduler,
 }
 
 available_schedulers = list(scheduler_mapping.keys())
@@ -1164,11 +1169,14 @@ class HyVideoSampler:
         target_height = align_to(height, 16)
         target_width = align_to(width, 16)
 
-        model["scheduler_config"]["flow_shift"] = flow_shift
-        model["scheduler_config"]["algorithm_type"] = "sde-dpmsolver++"
+        scheduler_config = model["scheduler_config"]
+
+        scheduler_config["flow_shift"] = flow_shift
+        if scheduler == "SDE-DPMSolverMultistepScheduler":
+            scheduler_config["algorithm_type"] = "sde-dpmsolver++"
         #model["scheduler_config"]["use_beta_flow_sigmas"] = True
         
-        noise_scheduler = scheduler_mapping[scheduler].from_config(model["scheduler_config"])
+        noise_scheduler = scheduler_mapping[scheduler].from_config(scheduler_config)
         model["pipe"].scheduler = noise_scheduler
 
         if model["block_swap_args"] is not None:
