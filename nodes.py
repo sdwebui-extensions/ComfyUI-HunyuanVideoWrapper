@@ -48,6 +48,8 @@ import comfy.latent_formats
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
+VAE_SCALING_FACTOR = 0.476986
+
 def filter_state_dict_by_blocks(state_dict, blocks_mapping):
     filtered_dict = {}
 
@@ -1164,11 +1166,10 @@ class HyVideoSampler:
 
         model["scheduler_config"]["flow_shift"] = flow_shift
         model["scheduler_config"]["algorithm_type"] = "sde-dpmsolver++"
-        #model["scheduler_config"]["use_beta_sigmas"] = True
+        #model["scheduler_config"]["use_beta_flow_sigmas"] = True
         
         noise_scheduler = scheduler_mapping[scheduler].from_config(model["scheduler_config"])
         model["pipe"].scheduler = noise_scheduler
-        #model["pipe"].scheduler.flow_shift = flow_shift
 
         if model["block_swap_args"] is not None:
             for name, param in transformer.named_parameters():
@@ -1229,7 +1230,7 @@ class HyVideoSampler:
             cfg_start_percent=cfg_start_percent,
             cfg_end_percent=cfg_end_percent,
             embedded_guidance_scale=embedded_guidance_scale,
-            latents=samples["samples"] if samples is not None else None,
+            latents=samples["samples"] * VAE_SCALING_FACTOR if samples is not None else None,
             denoise_strength=denoise_strength,
             prompt_embed_dict=hyvid_embeds,
             generator=generator,
@@ -1255,7 +1256,7 @@ class HyVideoSampler:
                 gc.collect()
 
         return ({
-            "samples": out_latents
+            "samples": out_latents.cpu() / VAE_SCALING_FACTOR
             },)
 
 #region VideoDecode
@@ -1310,8 +1311,7 @@ class HyVideoDecode:
             raise ValueError(
                 f"Only support latents with shape (b, c, h, w) or (b, c, f, h, w), but got {latents.shape}."
             )
-
-        latents = latents / vae.config.scaling_factor
+        #latents = latents / vae.config.scaling_factor
         latents = latents.to(vae.dtype).to(device)
 
         if enable_vae_tiling:
@@ -1385,7 +1385,7 @@ class HyVideoEncode:
         if enable_vae_tiling:
             vae.enable_tiling()
         latents = vae.encode(image).latent_dist.sample(generator)
-        latents = latents * vae.config.scaling_factor
+        #latents = latents * vae.config.scaling_factor
         vae.to(offload_device)
         print("encoded latents shape",latents.shape)
 

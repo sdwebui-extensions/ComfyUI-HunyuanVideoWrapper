@@ -11,6 +11,8 @@ from .enhance_a_video.globals import enable_enhance, disable_enhance, set_enhanc
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
+VAE_SCALING_FACTOR = 0.476986
+
 def generate_eta_values(
     timesteps, 
     start_step, 
@@ -97,7 +99,7 @@ class HyVideoInverseSampler:
         
         generator = torch.Generator(device=torch.device("cpu")).manual_seed(seed)
 
-        latents = samples["samples"] if samples is not None else None
+        latents = samples["samples"] * VAE_SCALING_FACTOR if samples is not None else None
         batch_size, num_channels_latents, latent_num_frames, latent_height, latent_width = latents.shape
         height = latent_height * pipeline.vae_scale_factor
         width = latent_width * pipeline.vae_scale_factor
@@ -270,7 +272,7 @@ class HyVideoInverseSampler:
                 gc.collect()
 
         return ({
-            "samples": latents
+            "samples": latents / VAE_SCALING_FACTOR
             },)
 
 class HyVideoReSampler:
@@ -312,7 +314,7 @@ class HyVideoReSampler:
         transformer = model["pipe"].transformer
         pipeline = model["pipe"]
         
-        target_latents = samples["samples"]
+        target_latents = samples["samples"] * VAE_SCALING_FACTOR
 
         batch_size, num_channels_latents, latent_num_frames, latent_height, latent_width = target_latents.shape
         height = latent_height * pipeline.vae_scale_factor
@@ -370,7 +372,7 @@ class HyVideoReSampler:
            
         
         target_latents = target_latents.to(device)
-        latents = inversed_latents["samples"]
+        latents = inversed_latents["samples"] * VAE_SCALING_FACTOR
 
         # 7. Denoising loop
         self._num_timesteps = len(timesteps)
@@ -475,7 +477,7 @@ class HyVideoReSampler:
                 gc.collect()
 
         return ({
-            "samples": latents
+            "samples": latents / VAE_SCALING_FACTOR
             },)
     
 class HyVideoPromptMixSampler:
@@ -712,7 +714,7 @@ class HyVideoPromptMixSampler:
                 gc.collect()
 
         return ({
-            "samples": latents
+            "samples": latents / VAE_SCALING_FACTOR
             },)
 
 NODE_CLASS_MAPPINGS = {

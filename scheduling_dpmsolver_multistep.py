@@ -219,6 +219,7 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
         use_beta_sigmas: Optional[bool] = False,
         use_lu_lambdas: Optional[bool] = False,
         use_flow_sigmas: Optional[bool] = False,
+        use_beta_flow_sigmas: Optional[bool] = False,
         flow_shift: Optional[float] = 1.0,
         final_sigmas_type: Optional[str] = "zero",  # "zero", "sigma_min"
         lambda_min_clipped: float = -float("inf"),
@@ -409,6 +410,15 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
             sigmas = np.flip(sigmas).copy()
             sigmas = self._convert_to_beta(in_sigmas=sigmas, num_inference_steps=num_inference_steps)
             timesteps = np.array([self._sigma_to_t(sigma, log_sigmas) for sigma in sigmas])
+        elif self.config.use_beta_flow_sigmas:
+            alphas = np.linspace(1, 1 / self.config.num_train_timesteps, num_inference_steps + 1)
+            flow_sigmas = 1.0 - alphas
+            flow_sigmas = np.flip(self.config.flow_shift * flow_sigmas / 
+                                (1 + (self.config.flow_shift - 1) * flow_sigmas))[:-1]
+            sigmas = self._convert_to_beta(in_sigmas=flow_sigmas, 
+                                            num_inference_steps=num_inference_steps)
+            #timesteps = np.array([self._sigma_to_t(sigma, log_sigmas) for sigma in sigmas])
+            timesteps = (sigmas * self.config.num_train_timesteps).copy()
         elif self.config.use_flow_sigmas:
             alphas = np.linspace(1, 1 / self.config.num_train_timesteps, num_inference_steps + 1)
             sigmas = 1.0 - alphas
