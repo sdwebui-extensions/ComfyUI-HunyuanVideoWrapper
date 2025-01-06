@@ -175,6 +175,27 @@ class HyVideoSTG:
     def setargs(self, **kwargs):
         return (kwargs, )
 
+class HyVideoTeaCache:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "rel_l1_thresh": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01,
+                                            "tooltip": "Higher values will make TeaCache more aggressive, faster, but may cause artifacts"}),
+            },
+        }
+    RETURN_TYPES = ("TEACACHEARGS",)
+    RETURN_NAMES = ("teacache_args",)
+    FUNCTION = "process"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "TeaCache settings for HunyuanVideo to speed up inference"
+
+    def process(self, rel_l1_thresh):
+        teacache_args = {
+            "rel_l1_thresh": rel_l1_thresh,
+        }
+        return (teacache_args,)
+
 
 class HyVideoModel(comfy.model_base.BaseModel):
     def __init__(self, *args, **kwargs):
@@ -1058,6 +1079,7 @@ class HyVideoSampler:
                 "stg_args": ("STGARGS", ),
                 "context_options": ("COGCONTEXT", ),
                 "feta_args": ("FETAARGS", ),
+                "teacache_args": ("TEACACHEARGS", )
             }
         }
 
@@ -1067,7 +1089,7 @@ class HyVideoSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
-                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None):
+                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, teacache_args=None):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1128,6 +1150,27 @@ class HyVideoSampler:
                     param.data = param.data.to(device)
         elif model["manual_offloading"]:
             transformer.to(device)
+
+        # Initialize TeaCache if enabled
+        if teacache_args is not None:
+            # Check if dimensions have changed since last run
+            if (not hasattr(transformer, 'last_dimensions') or
+                    transformer.last_dimensions != (height, width, num_frames) or
+                    not hasattr(transformer, 'last_frame_count') or
+                    transformer.last_frame_count != num_frames):
+                # Reset TeaCache state on dimension change
+                transformer.cnt = 0
+                transformer.accumulated_rel_l1_distance = 0
+                transformer.previous_modulated_input = None
+                transformer.previous_residual = None
+                transformer.last_dimensions = (height, width, num_frames)
+                transformer.last_frame_count = num_frames
+
+            transformer.enable_teacache = True
+            transformer.num_steps = steps
+            transformer.rel_l1_thresh = teacache_args["rel_l1_thresh"]
+        else:
+            transformer.enable_teacache = False
 
         mm.soft_empty_cache()
         gc.collect()
@@ -1408,6 +1451,7 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoTextEmbedsLoad": HyVideoTextEmbedsLoad,
     "HyVideoContextOptions": HyVideoContextOptions,
     "HyVideoEnhanceAVideo": HyVideoEnhanceAVideo,
+    "HyVideoTeaCache": HyVideoTeaCache,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1430,4 +1474,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoTextEmbedsLoad": "HunyuanVideo TextEmbeds Load",
     "HyVideoContextOptions": "HunyuanVideo Context Options",
     "HyVideoEnhanceAVideo": "HunyuanVideo Enhance A Video",
+    "HyVideoTeaCache": "HunyuanVideo TeaCache",
     }
