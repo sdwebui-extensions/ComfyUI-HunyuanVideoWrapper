@@ -20,7 +20,7 @@ class LatentPreviewer:
 
     def decode_latent_to_preview_image(self, preview_format, x0):
         preview_image = self.decode_latent_to_preview(x0)
-        return ("GIF", preview_image, MAX_PREVIEW_RESOLUTION)
+        return ("JPEG", preview_image, MAX_PREVIEW_RESOLUTION)
 
 class Latent2RGBPreviewer(LatentPreviewer):
     def __init__(self):

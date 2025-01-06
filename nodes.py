@@ -334,7 +334,7 @@ class HyVideoModelLoader:
             "prediction_type": 'flow_prediction'
         }
         scheduler = FlowMatchDiscreteScheduler.from_config(scheduler_config)
-        print(scheduler.config)
+        
         pipe = HunyuanVideoPipeline(
             transformer=transformer,
             scheduler=scheduler,
@@ -1164,6 +1164,7 @@ class HyVideoSampler:
 
         model["scheduler_config"]["flow_shift"] = flow_shift
         model["scheduler_config"]["algorithm_type"] = "sde-dpmsolver++"
+        #model["scheduler_config"]["use_beta_sigmas"] = True
         
         noise_scheduler = scheduler_mapping[scheduler].from_config(model["scheduler_config"])
         model["pipe"].scheduler = noise_scheduler

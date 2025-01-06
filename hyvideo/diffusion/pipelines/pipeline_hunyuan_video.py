@@ -633,11 +633,12 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         from ....latent_preview import prepare_callback
         callback = prepare_callback(self.transformer, num_inference_steps)
 
+        print(self.scheduler.sigmas)
+
         
         logger.info(f"Sampling {video_length} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")
         comfy_pbar = ProgressBar(len(timesteps))
         with self.progress_bar(total=len(timesteps)) as progress_bar:
-            old_pred_original_sample = None # for DPM-solver++
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
@@ -789,7 +790,12 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                     if progress_bar is not None:
                         progress_bar.update()
                     if callback is not None:
-                        callback(i, latents.detach()[-1].permute(1,0,2,3), None, num_inference_steps)
+                        callback(
+                            i, 
+                            (latent_model_input - noise_pred).detach()[0].permute(1,0,2,3),
+                            None, 
+                            num_inference_steps
+                        )
                     else:
                         comfy_pbar.update(1)
 
