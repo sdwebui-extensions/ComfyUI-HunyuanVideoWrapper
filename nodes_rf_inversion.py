@@ -90,6 +90,7 @@ class HyVideoInverseSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, samples, gamma, start_step, end_step, gamma_trend, force_offload, interpolation_curve=None):
+        comfy_model_patcher = model
         model = model.model
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -191,8 +192,8 @@ class HyVideoInverseSampler:
         num_warmup_steps = len(timesteps) - steps * pipeline.scheduler.order
         self._num_timesteps = len(timesteps)
 
-        from .latent_preview import prepare_callback
-        callback = prepare_callback(transformer, steps)
+        from latent_preview import prepare_callback
+        callback = prepare_callback(comfy_model_patcher, steps)
 
         from comfy.utils import ProgressBar
         from tqdm import tqdm
@@ -307,6 +308,7 @@ class HyVideoReSampler:
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, 
                 samples, inversed_latents, force_offload, start_step, end_step, eta_base, eta_trend, interpolation_curve=None, feta_args=None):
+        comfy_model_patcher = model
         model = model.model
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -377,8 +379,8 @@ class HyVideoReSampler:
         # 7. Denoising loop
         self._num_timesteps = len(timesteps)
 
-        from .latent_preview import prepare_callback
-        callback = prepare_callback(transformer, steps)
+        from latent_preview import prepare_callback
+        callback = prepare_callback(comfy_model_patcher, steps)
 
         if feta_args is not None:
             set_enhance_weight(feta_args["weight"])
@@ -512,6 +514,7 @@ class HyVideoPromptMixSampler:
 
     def process(self, model, width, height, num_frames, hyvid_embeds, hyvid_embeds_2, flow_shift, steps, embedded_guidance_scale, 
                 seed, force_offload, alpha, interpolation_curve=None, feta_args=None):
+        comfy_model_patcher = model
         model = model.model
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -605,8 +608,8 @@ class HyVideoPromptMixSampler:
         # 7. Denoising loop
         self._num_timesteps = len(timesteps)
 
-        from .latent_preview import prepare_callback
-        callback = prepare_callback(transformer, steps)
+        from latent_preview import prepare_callback
+        callback = prepare_callback(comfy_model_patcher, steps)
 
         from comfy.utils import ProgressBar
         from tqdm import tqdm

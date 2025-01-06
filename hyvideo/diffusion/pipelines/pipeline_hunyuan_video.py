@@ -174,6 +174,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         self,
         transformer: HYVideoDiffusionTransformer,
         scheduler: KarrasDiffusionSchedulers,
+        comfy_model = None,
         progress_bar_config: Dict[str, Any] = None,
         base_dtype = torch.bfloat16,
     ):
@@ -187,6 +188,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         self._progress_bar_config.update(progress_bar_config)
 
         self.base_dtype = base_dtype
+        self.comfy_model = comfy_model
         # ==========================================================================================
 
         self.register_modules(
@@ -630,8 +632,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         self._num_timesteps = len(timesteps)
 
         # 8. Preview callback
-        from ....latent_preview import prepare_callback
-        callback = prepare_callback(self.transformer, num_inference_steps)
+        from latent_preview import prepare_callback
+        callback = prepare_callback(self.comfy_model, num_inference_steps)
 
         #print(self.scheduler.sigmas)
 

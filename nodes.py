@@ -242,7 +242,7 @@ class HyVideoModelConfig:
     def __init__(self, dtype):
         self.unet_config = {}
         self.unet_extra_config = {}
-        self.latent_format = comfy.latent_formats.LatentFormat()
+        self.latent_format = comfy.latent_formats.HunyuanVideo
         self.latent_format.latent_channels = 16
         self.manual_cast_dtype = dtype
         self.sampling_settings = {"multiplier": 1.0}
@@ -332,7 +332,8 @@ class HyVideoModelLoader:
             HyVideoModelConfig(base_dtype),
             model_type=comfy.model_base.ModelType.FLOW,
             device=device,
-        )
+        )        
+        
         scheduler_config = {
             "flow_shift": 9.0,
             "reverse": True,
@@ -346,7 +347,8 @@ class HyVideoModelLoader:
             transformer=transformer,
             scheduler=scheduler,
             progress_bar_config=None,
-            base_dtype=base_dtype
+            base_dtype=base_dtype,
+            comfy_model=comfy_model,
         )
 
         if not "torchao" in quantization:
@@ -362,6 +364,7 @@ class HyVideoModelLoader:
 
             comfy_model.diffusion_model = transformer
             patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, offload_device)
+            pipe.comfy_model = patcher
 
             del sd
             gc.collect()
