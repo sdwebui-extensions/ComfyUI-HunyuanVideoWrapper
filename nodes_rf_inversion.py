@@ -121,7 +121,7 @@ class HyVideoInverseSampler:
 
         freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_num_frames, height, width)
 
-        pipeline.scheduler.shift = flow_shift
+        pipeline.scheduler.flow_shift = flow_shift
   
         if model["block_swap_args"] is not None:
             for name, param in transformer.named_parameters():
@@ -336,7 +336,7 @@ class HyVideoReSampler:
 
         freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_num_frames, height, width)
 
-        pipeline.scheduler.shift = flow_shift
+        pipeline.scheduler.flow_shift = flow_shift
   
         if model["block_swap_args"] is not None:
             for name, param in transformer.named_parameters():
@@ -535,7 +535,7 @@ class HyVideoPromptMixSampler:
         latent_video_length = (num_frames - 1) // 4 + 1
         freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_video_length, height, width)
 
-        pipeline.scheduler.shift = flow_shift
+        pipeline.scheduler.flow_shift = flow_shift
   
         if model["block_swap_args"] is not None:
             for name, param in transformer.named_parameters():
