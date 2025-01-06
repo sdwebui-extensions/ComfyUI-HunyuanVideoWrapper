@@ -766,20 +766,9 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                         )
 
                 # compute the previous noisy sample x_t -> x_t-1
-                if not isinstance(self.scheduler, DPMSolverMultistepScheduler):
-                    latents = self.scheduler.step(
-                        noise_pred, t, latents, **extra_step_kwargs, return_dict=False
-                    )[0]
-                else:
-                    latents, old_pred_original_sample = self.scheduler.step(
-                        noise_pred,
-                        old_pred_original_sample,
-                        t,
-                        timesteps[i - 1] if i > 0 else None,
-                        latents,
-                        **extra_step_kwargs,
-                        return_dict=False,
-                    )
+                latents = self.scheduler.step(
+                    noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+                )[0]
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}

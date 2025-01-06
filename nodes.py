@@ -10,6 +10,28 @@ from .hyvideo.constants import PROMPT_TEMPLATE
 from .hyvideo.text_encoder import TextEncoder
 from .hyvideo.utils.data_utils import align_to
 from .hyvideo.diffusion.schedulers import FlowMatchDiscreteScheduler
+
+from .scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
+
+# from diffusers.schedulers import ( 
+#     DDIMScheduler, 
+#     PNDMScheduler, 
+#     DPMSolverMultistepScheduler, 
+#     EulerDiscreteScheduler, 
+#     EulerAncestralDiscreteScheduler,
+#     UniPCMultistepScheduler,
+#     HeunDiscreteScheduler,
+#     SASolverScheduler,
+#     DEISMultistepScheduler,
+#     LCMScheduler
+#     )
+
+scheduler_mapping = {
+    "FlowMatchDiscreteScheduler": FlowMatchDiscreteScheduler,
+    "DPMSolverMultistepScheduler": DPMSolverMultistepScheduler,
+}
+
+available_schedulers = list(scheduler_mapping.keys())
 from .hyvideo.diffusion.pipelines import HunyuanVideoPipeline
 from .hyvideo.vae.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
 from .hyvideo.modules.models import HYVideoDiffusionTransformer
@@ -304,11 +326,15 @@ class HyVideoModelLoader:
             model_type=comfy.model_base.ModelType.FLOW,
             device=device,
         )
-        scheduler = FlowMatchDiscreteScheduler(
-            shift=9.0,
-            reverse=True,
-            solver="euler",
-        )
+        scheduler_config = {
+            "flow_shift": 9.0,
+            "reverse": True,
+            "solver": "euler",
+            "use_flow_sigmas": True, 
+            "prediction_type": 'flow_prediction'
+        }
+        scheduler = FlowMatchDiscreteScheduler.from_config(scheduler_config)
+        print(scheduler.config)
         pipe = HunyuanVideoPipeline(
             transformer=transformer,
             scheduler=scheduler,
@@ -466,6 +492,7 @@ class HyVideoModelLoader:
         patcher.model["quantization"] = "disabled"
         patcher.model["block_swap_args"] = block_swap_args
         patcher.model["auto_cpu_offload"] = auto_cpu_offload
+        patcher.model["scheduler_config"] = scheduler_config
 
         return (patcher,)
 
@@ -1079,7 +1106,11 @@ class HyVideoSampler:
                 "stg_args": ("STGARGS", ),
                 "context_options": ("COGCONTEXT", ),
                 "feta_args": ("FETAARGS", ),
-                "teacache_args": ("TEACACHEARGS", )
+                "teacache_args": ("TEACACHEARGS", ),
+                "scheduler": (available_schedulers,
+                    {
+                        "default": 'FlowMatchDiscreteScheduler'
+                    }),
             }
         }
 
@@ -1089,7 +1120,7 @@ class HyVideoSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
-                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, teacache_args=None):
+                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, teacache_args=None, scheduler=None):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1131,7 +1162,12 @@ class HyVideoSampler:
         target_height = align_to(height, 16)
         target_width = align_to(width, 16)
 
-        model["pipe"].scheduler.shift = flow_shift
+        model["scheduler_config"]["flow_shift"] = flow_shift
+        model["scheduler_config"]["algorithm_type"] = "sde-dpmsolver++"
+        
+        noise_scheduler = scheduler_mapping[scheduler].from_config(model["scheduler_config"])
+        model["pipe"].scheduler = noise_scheduler
+        #model["pipe"].scheduler.flow_shift = flow_shift
 
         if model["block_swap_args"] is not None:
             for name, param in transformer.named_parameters():
