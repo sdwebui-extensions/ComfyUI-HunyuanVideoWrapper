@@ -252,7 +252,7 @@ class HyVideoInverseSampler:
                 
                 progress_bar.update()
                 if callback is not None:
-                    callback(idx, (latent_model_input - noise_pred).detach()[0].permute(1,0,2,3), None, steps)
+                    callback(idx, (latent_model_input - noise_pred * t / 1000).detach()[0].permute(1,0,2,3), None, steps)
                 else:
                     comfy_pbar.update(1)
                   
@@ -458,7 +458,7 @@ class HyVideoReSampler:
 
                     progress_bar.update()
                     if callback is not None:
-                        callback(idx, (latent_model_input - noise_pred).detach()[0].permute(1,0,2,3), None, steps)
+                        callback(idx, (latent_model_input - noise_pred * t / 1000).detach()[0].permute(1,0,2,3), None, steps)
                     else:
                         comfy_pbar.update(1)
 
@@ -695,7 +695,7 @@ class HyVideoPromptMixSampler:
 
                     progress_bar.update()
                     if callback is not None:
-                        callback(idx, (latent_model_input - noise_pred).detach()[0].permute(1,0,2,3), None, steps)
+                        callback(idx, (latent_model_input - noise_pred * t / 1000).detach()[0].permute(1,0,2,3), None, steps)
                     else:
                         comfy_pbar.update(1)
 

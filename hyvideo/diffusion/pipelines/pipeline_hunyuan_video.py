@@ -792,7 +792,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                     if callback is not None:
                         callback(
                             i, 
-                            (latent_model_input - noise_pred).detach()[0].permute(1,0,2,3),
+                            (latent_model_input - noise_pred * t / 1000).detach()[0].permute(1,0,2,3),
                             None, 
                             num_inference_steps
                         )
