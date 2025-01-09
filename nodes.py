@@ -1177,6 +1177,10 @@ class HyVideoSampler:
         scheduler_config["flow_shift"] = flow_shift
         if scheduler == "SDE-DPMSolverMultistepScheduler":
             scheduler_config["algorithm_type"] = "sde-dpmsolver++"
+        elif scheduler == "SASolverScheduler":
+            scheduler_config["algorithm_type"] = "data_prediction"
+        else:
+            scheduler_config.pop("algorithm_type", None)
         #model["scheduler_config"]["use_beta_flow_sigmas"] = True
         
         noise_scheduler = scheduler_mapping[scheduler].from_config(scheduler_config)
