@@ -1076,10 +1076,10 @@ class HyVideoContextOptions:
             }
         }
 
-    RETURN_TYPES = ("COGCONTEXT", )
+    RETURN_TYPES = ("HYVIDCONTEXT", )
     RETURN_NAMES = ("context_options",)
     FUNCTION = "process"
-    CATEGORY = "CogVideoWrapper"
+    CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Context options for HunyuanVideo, allows splitting the video into context windows and attemps blending them for longer generations than the model and memory otherwise would allow."
 
     def process(self, context_schedule, context_frames, context_stride, context_overlap, freenoise):
@@ -1114,7 +1114,7 @@ class HyVideoSampler:
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "stg_args": ("STGARGS", ),
-                "context_options": ("COGCONTEXT", ),
+                "context_options": ("HYVIDCONTEXT", ),
                 "feta_args": ("FETAARGS", ),
                 "teacache_args": ("TEACACHEARGS", ),
                 "scheduler": (available_schedulers,
