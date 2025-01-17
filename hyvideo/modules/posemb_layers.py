@@ -92,7 +92,8 @@ def apply_rotary_emb(
 
     """
    
-    cos, sin = [f.view(*xq.shape[:2], 1, xq.shape[3]) for f in freqs_cis]
+    shape = [d if i == 1 or i == xq.ndim - 1 else 1 for i, d in enumerate(xq.shape)]
+    cos, sin = freqs_cis[0].view(*shape), freqs_cis[1].view(*shape)
 
     if upcast:
         xq_out = apply_rotary(xq.float(), cos, sin).to(xq.dtype)
