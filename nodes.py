@@ -275,6 +275,7 @@ class HyVideoModelLoader:
                 "block_swap_args": ("BLOCKSWAPARGS", ),
                 "lora": ("HYVIDLORA", {"default": None}),
                 "auto_cpu_offload": ("BOOLEAN", {"default": False, "tooltip": "Enable auto offloading for reduced VRAM usage, implementation from DiffSynth-Studio, slightly different from block swapping and uses even less VRAM, but can be slower as you can't define how much VRAM to use"}),
+                "upcast_rope": ("BOOLEAN", {"default": True, "tooltip": "Upcast RoPE to fp32 for better accuracy, this is the default behaviour, disabling can improve speed and reduce memory use slightly"}),
             }
         }
 
@@ -284,7 +285,7 @@ class HyVideoModelLoader:
     CATEGORY = "HunyuanVideoWrapper"
 
     def loadmodel(self, model, base_precision, load_device,  quantization,
-                  compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, auto_cpu_offload=False):
+                  compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, auto_cpu_offload=False, upcast_rope=True):
         transformer = None
         #mm.unload_all_models()
         mm.soft_empty_cache()
@@ -327,6 +328,8 @@ class HyVideoModelLoader:
                 **factor_kwargs
             )
         transformer.eval()
+
+        transformer.upcast_rope = upcast_rope
 
         comfy_model = HyVideoModel(
             HyVideoModelConfig(base_dtype),

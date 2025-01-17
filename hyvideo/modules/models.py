@@ -196,6 +196,7 @@ class MMDoubleStreamBlock(nn.Module):
         max_seqlen_kv: Optional[int] = None,
         freqs_cis: tuple = None,
         attn_mask: Optional[torch.Tensor] = None,
+        upcast_rope: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         (
             img_mod1_shift,
@@ -229,7 +230,7 @@ class MMDoubleStreamBlock(nn.Module):
 
         # Apply RoPE if needed.
         if freqs_cis is not None:
-            img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, head_first=False)
+            img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, upcast=upcast_rope)
             
         # Prepare txt for attention.
         txt_modulated = self.txt_norm1(txt)
@@ -380,6 +381,7 @@ class MMSingleStreamBlock(nn.Module):
         max_seqlen_kv: Optional[int] = None,
         freqs_cis: Tuple[torch.Tensor, torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
+        upcast_rope: bool = True,
         stg_mode: Optional[str] = None,
     ) -> torch.Tensor:
         mod_shift, mod_scale, mod_gate = self.modulation(vec).chunk(3, dim=-1)
@@ -398,7 +400,7 @@ class MMSingleStreamBlock(nn.Module):
         if freqs_cis is not None:
             img_q, txt_q = q[:, :-txt_len, :, :], q[:, -txt_len:, :, :]
             img_k, txt_k = k[:, :-txt_len, :, :], k[:, -txt_len:, :, :]
-            img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, head_first=False)
+            img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, upcast=upcast_rope)
             # assert (
             #     img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
             # ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
@@ -467,6 +469,7 @@ class MMSingleStreamBlock(nn.Module):
             )
             if is_enhance_enabled_single():
                 attn *= feta_scores
+                #attn[:, :-txt_len, :] *= feta_scores
         
             # Compute activation in mlp stream, cat again and run second linear layer.
             output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
@@ -672,6 +675,9 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
             get_activation_layer("silu"),
             **factory_kwargs,
         )
+
+        self.upcast_rope = True
+        
         #init block swap variables
         self.double_blocks_to_swap = -1
         self.single_blocks_to_swap = -1
@@ -984,7 +990,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
 
         freqs_cis = (freqs_cos, freqs_sin) if freqs_cos is not None else None
 
-        block_args = [cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, freqs_cis, attn_mask]
+        block_args = [cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, freqs_cis, attn_mask, self.upcast_rope]
 
         #tea_cache
         if self.enable_teacache:

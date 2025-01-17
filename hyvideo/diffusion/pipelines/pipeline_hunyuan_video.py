@@ -597,9 +597,12 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             freqs_cos, freqs_sin = get_rotary_pos_embed(
                 self.transformer, latent_video_length, height, width
             )
-        
-        freqs_cos = freqs_cos.to(self.base_dtype).to(device)
-        freqs_sin = freqs_sin.to(self.base_dtype).to(device)
+        if not self.transformer.upcast_rope:
+            freqs_cos = freqs_cos.to(self.base_dtype).to(device)
+            freqs_sin = freqs_sin.to(self.base_dtype).to(device)
+        else:
+            freqs_cos = freqs_cos.to(device)
+            freqs_sin = freqs_sin.to(device)
         
 
         # 5. Prepare latent variables

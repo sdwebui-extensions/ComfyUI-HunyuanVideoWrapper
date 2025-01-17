@@ -61,87 +61,18 @@ def get_meshgrid_nd(start, *args, dim=2):
 #################################################################################
 # https://github.com/meta-llama/llama/blob/be327c427cc5e89cc1d3ab3d3fec4484df771245/llama/model.py#L80
 
-
-def reshape_for_broadcast(
-    freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
-    x: torch.Tensor,
-    head_first=False,
-):
-    """
-    Reshape frequency tensor for broadcasting it with another tensor.
-
-    This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
-    for the purpose of broadcasting the frequency tensor during element-wise operations.
-
-    Notes:
-        When using FlashMHAModified, head_first should be False.
-        When using Attention, head_first should be True.
-
-    Args:
-        freqs_cis (Union[torch.Tensor, Tuple[torch.Tensor]]): Frequency tensor to be reshaped.
-        x (torch.Tensor): Target tensor for broadcasting compatibility.
-        head_first (bool): head dimension first (except batch dim) or not.
-
-    Returns:
-        torch.Tensor: Reshaped frequency tensor.
-
-    Raises:
-        AssertionError: If the frequency tensor doesn't match the expected shape.
-        AssertionError: If the target tensor 'x' doesn't have the expected number of dimensions.
-    """
-    ndim = x.ndim
-    assert 0 <= 1 < ndim
-
-    if isinstance(freqs_cis, tuple):
-        # freqs_cis: (cos, sin) in real space
-        if head_first:
-            assert freqs_cis[0].shape == (
-                x.shape[-2],
-                x.shape[-1],
-            ), f"freqs_cis shape {freqs_cis[0].shape} does not match x shape {x.shape}"
-            shape = [
-                d if i == ndim - 2 or i == ndim - 1 else 1
-                for i, d in enumerate(x.shape)
-            ]
-        else:
-            assert freqs_cis[0].shape == (
-                x.shape[1],
-                x.shape[-1],
-            ), f"freqs_cis shape {freqs_cis[0].shape} does not match x shape {x.shape}"
-            shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-        return freqs_cis[0].view(*shape), freqs_cis[1].view(*shape)
-    else:
-        # freqs_cis: values in complex space
-        if head_first:
-            assert freqs_cis.shape == (
-                x.shape[-2],
-                x.shape[-1],
-            ), f"freqs_cis shape {freqs_cis.shape} does not match x shape {x.shape}"
-            shape = [
-                d if i == ndim - 2 or i == ndim - 1 else 1
-                for i, d in enumerate(x.shape)
-            ]
-        else:
-            assert freqs_cis.shape == (
-                x.shape[1],
-                x.shape[-1],
-            ), f"freqs_cis shape {freqs_cis.shape} does not match x shape {x.shape}"
-            shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-        return freqs_cis.view(*shape)
-
-
-def rotate_half(x):
-    x_real, x_imag = (
-        x.float().reshape(*x.shape[:-1], -1, 2).unbind(-1)
-    )  # [B, S, H, D//2]
-    return torch.stack([-x_imag, x_real], dim=-1).flatten(3)
-
+    
+def apply_rotary(x, cos, sin):
+        x_reshaped = x.view(*x.shape[:-1], -1, 2)
+        x1, x2 = x_reshaped.unbind(-1)
+        x_rotated = torch.stack([-x2, x1], dim=-1).flatten(3)
+        return (x * cos) + (x_rotated * sin)
 
 def apply_rotary_emb(
     xq: torch.Tensor,
     xk: torch.Tensor,
     freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-    head_first: bool = False,
+    upcast: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary embeddings to input tensors using the given frequency tensor.
@@ -155,35 +86,20 @@ def apply_rotary_emb(
         xq (torch.Tensor): Query tensor to apply rotary embeddings. [B, S, H, D]
         xk (torch.Tensor): Key tensor to apply rotary embeddings.   [B, S, H, D]
         freqs_cis (torch.Tensor or tuple): Precomputed frequency tensor for complex exponential.
-        head_first (bool): head dimension first (except batch dim) or not.
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
 
     """
-    xk_out = None
-    if isinstance(freqs_cis, tuple):
-        cos, sin = reshape_for_broadcast(freqs_cis, xq, head_first)  # [S, D]
-        cos, sin = cos.to(xq.device), sin.to(xq.device)
-        # real * cos - imag * sin
-        # imag * cos + real * sin
-        xq_out = (xq.float() * cos + rotate_half(xq.float()) * sin).type_as(xq)
-        xk_out = (xk.float() * cos + rotate_half(xk.float()) * sin).type_as(xk)
+   
+    cos, sin = [f.view(*xq.shape[:2], 1, xq.shape[3]) for f in freqs_cis]
+
+    if upcast:
+        xq_out = apply_rotary(xq.float(), cos, sin).to(xq.dtype)
+        xk_out = apply_rotary(xk.float(), cos, sin).to(xk.dtype)
     else:
-        # view_as_complex will pack [..., D/2, 2](real) to [..., D/2](complex)
-        xq_ = torch.view_as_complex(
-            xq.float().reshape(*xq.shape[:-1], -1, 2)
-        )  # [B, S, H, D//2]
-        freqs_cis = reshape_for_broadcast(freqs_cis, xq_, head_first).to(
-            xq.device
-        )  # [S, D//2] --> [1, S, 1, D//2]
-        # (real, imag) * (cos, sin) = (real * cos - imag * sin, imag * cos + real * sin)
-        # view_as_real will expand [..., D/2](complex) to [..., D/2, 2](real)
-        xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3).type_as(xq)
-        xk_ = torch.view_as_complex(
-            xk.float().reshape(*xk.shape[:-1], -1, 2)
-        )  # [B, S, H, D//2]
-        xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3).type_as(xk)
+        xq_out = apply_rotary(xq, cos, sin)
+        xk_out = apply_rotary(xk, cos, sin)
 
     return xq_out, xk_out
 
