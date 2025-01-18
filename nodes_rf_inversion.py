@@ -61,6 +61,7 @@ class HyVideoEmptyTextEmbeds:
         prompt_embeds_dict = torch.load(os.path.join(script_directory, "hunyuan_empty_prompt_embeds_dict.pt"))
         return (prompt_embeds_dict,)
 
+#region Inverse Sampling
 class HyVideoInverseSampler:
     @classmethod
     def INPUT_TYPES(s):
@@ -121,6 +122,8 @@ class HyVideoInverseSampler:
         )
 
         freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_num_frames, height, width)
+        freqs_cos = freqs_cos.to(device)
+        freqs_sin = freqs_sin.to(device)
 
         pipeline.scheduler.flow_shift = flow_shift
   
@@ -191,6 +194,8 @@ class HyVideoInverseSampler:
         # 7. Denoising loop
         num_warmup_steps = len(timesteps) - steps * pipeline.scheduler.order
         self._num_timesteps = len(timesteps)
+
+        latents = latents.to(dtype)
 
         from latent_preview import prepare_callback
         callback = prepare_callback(comfy_model_patcher, steps)
@@ -276,6 +281,7 @@ class HyVideoInverseSampler:
             "samples": latents / VAE_SCALING_FACTOR
             },)
 
+#region ReSampler
 class HyVideoReSampler:
     @classmethod
     def INPUT_TYPES(s):
@@ -337,6 +343,8 @@ class HyVideoReSampler:
         )
 
         freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_num_frames, height, width)
+        freqs_cos = freqs_cos.to(device)
+        freqs_sin = freqs_sin.to(device)
 
         pipeline.scheduler.flow_shift = flow_shift
   
@@ -372,9 +380,9 @@ class HyVideoReSampler:
 
         eta_values = generate_eta_values(timesteps / 1000, start_step, end_step, eta_base, eta_trend)
            
-        
-        target_latents = target_latents.to(device)
+        target_latents = target_latents.to(device=device, dtype=dtype)
         latents = inversed_latents["samples"] * VAE_SCALING_FACTOR
+        latents = latents.to(device=device, dtype=dtype)
 
         # 7. Denoising loop
         self._num_timesteps = len(timesteps)
@@ -481,7 +489,8 @@ class HyVideoReSampler:
         return ({
             "samples": latents / VAE_SCALING_FACTOR
             },)
-    
+
+#region PromptMix
 class HyVideoPromptMixSampler:
     @classmethod
     def INPUT_TYPES(s):
@@ -537,6 +546,8 @@ class HyVideoPromptMixSampler:
         )
         latent_video_length = (num_frames - 1) // 4 + 1
         freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_video_length, height, width)
+        freqs_cos = freqs_cos.to(device)
+        freqs_sin = freqs_sin.to(device)
 
         pipeline.scheduler.flow_shift = flow_shift
   
