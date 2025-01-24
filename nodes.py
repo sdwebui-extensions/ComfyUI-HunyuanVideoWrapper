@@ -1156,6 +1156,9 @@ class HyVideoSampler:
             cfg = 1.0
             cfg_start_percent = 0.0
             cfg_end_percent = 1.0
+        
+        if embedded_guidance_scale == 0.0:
+            embedded_guidance_scale = None
 
         generator = torch.Generator(device=torch.device("cpu")).manual_seed(seed)
 
@@ -1259,6 +1262,7 @@ class HyVideoSampler:
             stg_end_percent=stg_args["stg_end_percent"] if stg_args is not None else 1.0,
             context_options=context_options,
             feta_args=feta_args,
+            leapfusion_img2vid = True if samples["samples"].shape[2] == 1 else False,
         )
 
         print_memory(device)
