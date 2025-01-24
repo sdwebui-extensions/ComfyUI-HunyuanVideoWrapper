@@ -291,7 +291,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         if latents is None:
             latents = noise
         elif leapfusion_img2vid:
-            noise[:, :, [0,], :, :] = latents[:, :, [0,], :, :]
+            noise[:, :, [0,], :, :] = latents[:, :, [0,], :, :].to(noise)
             latents = noise.to(device)
         elif denoise_strength < 1.0:
             latents = latents.to(device)
