@@ -1242,6 +1242,15 @@ class HyVideoSampler:
         #for name, param in transformer.named_parameters():
         #    print(name, param.data.device)
 
+        if samples is not None:
+            input_latents = samples["samples"] * VAE_SCALING_FACTOR
+            if input_latents.shape[2] == 1:
+                leapfusion_img2vid = True
+        else:
+            input_latents = None
+            leapfusion_img2vid = False
+            
+
         out_latents = model["pipe"](
             num_inference_steps=steps,
             height = target_height,
@@ -1251,7 +1260,7 @@ class HyVideoSampler:
             cfg_start_percent=cfg_start_percent,
             cfg_end_percent=cfg_end_percent,
             embedded_guidance_scale=embedded_guidance_scale,
-            latents=samples["samples"] * VAE_SCALING_FACTOR if samples is not None else None,
+            latents=input_latents,
             denoise_strength=denoise_strength,
             prompt_embed_dict=hyvid_embeds,
             generator=generator,
@@ -1262,7 +1271,7 @@ class HyVideoSampler:
             stg_end_percent=stg_args["stg_end_percent"] if stg_args is not None else 1.0,
             context_options=context_options,
             feta_args=feta_args,
-            leapfusion_img2vid = True if samples["samples"].shape[2] == 1 else False,
+            leapfusion_img2vid = leapfusion_img2vid
         )
 
         print_memory(device)
