@@ -507,6 +507,10 @@ class HyVideoModelLoader:
         patcher.model["auto_cpu_offload"] = auto_cpu_offload
         patcher.model["scheduler_config"] = scheduler_config
 
+        for model in mm.current_loaded_models:
+            if model._model() == patcher:
+                mm.current_loaded_models.remove(model)            
+
         return (patcher,)
 
 #region load VAE
