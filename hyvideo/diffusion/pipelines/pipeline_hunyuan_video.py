@@ -817,10 +817,6 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                     else:
                         comfy_pbar.update(1)
 
-        #latents = (latents / 2 + 0.5).clamp(0, 1).cpu()
-
-        # Offload all models
-        #self.maybe_free_model_hooks()
         if leapfusion_img2vid:
-                latents[:, :, [0,], :, :] = original_latents[:, :, [0,], :, :].to(latent_model_input)
+            latents = latents[:, :, 1:, :, :]
         return latents
