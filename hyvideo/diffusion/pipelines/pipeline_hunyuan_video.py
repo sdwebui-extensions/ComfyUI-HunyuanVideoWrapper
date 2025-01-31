@@ -808,9 +808,13 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                     if progress_bar is not None:
                         progress_bar.update()
                     if callback is not None:
+                        if leapfusion_img2vid:
+                            callback_latent = (latent_model_input[:, :, 1:, :, :] - noise_pred[:, :, 1:, :, :] * t / 1000).detach()[0].permute(1,0,2,3)
+                        else:
+                            callback_latent = (latent_model_input - noise_pred * t / 1000).detach()[0].permute(1,0,2,3)
                         callback(
                             i, 
-                            (latent_model_input - noise_pred * t / 1000).detach()[0].permute(1,0,2,3),
+                            callback_latent,
                             None, 
                             num_inference_steps
                         )
