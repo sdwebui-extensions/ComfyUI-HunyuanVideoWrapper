@@ -11,6 +11,8 @@ from .enhance_a_video.globals import enable_enhance, disable_enhance, set_enhanc
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
+VAE_SCALING_FACTOR = 0.476986
+
 def generate_eta_values(
     timesteps, 
     start_step, 
@@ -59,6 +61,7 @@ class HyVideoEmptyTextEmbeds:
         prompt_embeds_dict = torch.load(os.path.join(script_directory, "hunyuan_empty_prompt_embeds_dict.pt"))
         return (prompt_embeds_dict,)
 
+#region Inverse Sampling
 class HyVideoInverseSampler:
     @classmethod
     def INPUT_TYPES(s):
@@ -88,6 +91,7 @@ class HyVideoInverseSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, samples, gamma, start_step, end_step, gamma_trend, force_offload, interpolation_curve=None):
+        comfy_model_patcher = model
         model = model.model
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -97,7 +101,7 @@ class HyVideoInverseSampler:
         
         generator = torch.Generator(device=torch.device("cpu")).manual_seed(seed)
 
-        latents = samples["samples"] if samples is not None else None
+        latents = samples["samples"] * VAE_SCALING_FACTOR if samples is not None else None
         batch_size, num_channels_latents, latent_num_frames, latent_height, latent_width = latents.shape
         height = latent_height * pipeline.vae_scale_factor
         width = latent_width * pipeline.vae_scale_factor
@@ -118,8 +122,10 @@ class HyVideoInverseSampler:
         )
 
         freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_num_frames, height, width)
+        freqs_cos = freqs_cos.to(device)
+        freqs_sin = freqs_sin.to(device)
 
-        pipeline.scheduler.shift = flow_shift
+        pipeline.scheduler.flow_shift = flow_shift
   
         if model["block_swap_args"] is not None:
             for name, param in transformer.named_parameters():
@@ -189,8 +195,10 @@ class HyVideoInverseSampler:
         num_warmup_steps = len(timesteps) - steps * pipeline.scheduler.order
         self._num_timesteps = len(timesteps)
 
-        from .latent_preview import prepare_callback
-        callback = prepare_callback(transformer, steps)
+        latents = latents.to(dtype)
+
+        from latent_preview import prepare_callback
+        callback = prepare_callback(comfy_model_patcher, steps)
 
         from comfy.utils import ProgressBar
         from tqdm import tqdm
@@ -252,7 +260,7 @@ class HyVideoInverseSampler:
                 
                 progress_bar.update()
                 if callback is not None:
-                        callback(idx, latents.detach()[-1].permute(1,0,2,3), None, steps)
+                    callback(idx, (latent_model_input - noise_pred * t / 1000).detach()[0].permute(1,0,2,3), None, steps)
                 else:
                     comfy_pbar.update(1)
                   
@@ -270,9 +278,10 @@ class HyVideoInverseSampler:
                 gc.collect()
 
         return ({
-            "samples": latents
+            "samples": latents / VAE_SCALING_FACTOR
             },)
 
+#region ReSampler
 class HyVideoReSampler:
     @classmethod
     def INPUT_TYPES(s):
@@ -305,6 +314,7 @@ class HyVideoReSampler:
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, 
                 samples, inversed_latents, force_offload, start_step, end_step, eta_base, eta_trend, interpolation_curve=None, feta_args=None):
+        comfy_model_patcher = model
         model = model.model
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -312,7 +322,7 @@ class HyVideoReSampler:
         transformer = model["pipe"].transformer
         pipeline = model["pipe"]
         
-        target_latents = samples["samples"]
+        target_latents = samples["samples"] * VAE_SCALING_FACTOR
 
         batch_size, num_channels_latents, latent_num_frames, latent_height, latent_width = target_latents.shape
         height = latent_height * pipeline.vae_scale_factor
@@ -333,8 +343,10 @@ class HyVideoReSampler:
         )
 
         freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_num_frames, height, width)
+        freqs_cos = freqs_cos.to(device)
+        freqs_sin = freqs_sin.to(device)
 
-        pipeline.scheduler.shift = flow_shift
+        pipeline.scheduler.flow_shift = flow_shift
   
         if model["block_swap_args"] is not None:
             for name, param in transformer.named_parameters():
@@ -368,15 +380,15 @@ class HyVideoReSampler:
 
         eta_values = generate_eta_values(timesteps / 1000, start_step, end_step, eta_base, eta_trend)
            
-        
-        target_latents = target_latents.to(device)
-        latents = inversed_latents["samples"]
+        target_latents = target_latents.to(device=device, dtype=dtype)
+        latents = inversed_latents["samples"] * VAE_SCALING_FACTOR
+        latents = latents.to(device=device, dtype=dtype)
 
         # 7. Denoising loop
         self._num_timesteps = len(timesteps)
 
-        from .latent_preview import prepare_callback
-        callback = prepare_callback(transformer, steps)
+        from latent_preview import prepare_callback
+        callback = prepare_callback(comfy_model_patcher, steps)
 
         if feta_args is not None:
             set_enhance_weight(feta_args["weight"])
@@ -458,7 +470,7 @@ class HyVideoReSampler:
 
                     progress_bar.update()
                     if callback is not None:
-                        callback(idx, latents.detach()[-1].permute(1,0,2,3), None, steps)
+                        callback(idx, (latent_model_input - noise_pred * t / 1000).detach()[0].permute(1,0,2,3), None, steps)
                     else:
                         comfy_pbar.update(1)
 
@@ -475,9 +487,10 @@ class HyVideoReSampler:
                 gc.collect()
 
         return ({
-            "samples": latents
+            "samples": latents / VAE_SCALING_FACTOR
             },)
-    
+
+#region PromptMix
 class HyVideoPromptMixSampler:
     @classmethod
     def INPUT_TYPES(s):
@@ -510,6 +523,7 @@ class HyVideoPromptMixSampler:
 
     def process(self, model, width, height, num_frames, hyvid_embeds, hyvid_embeds_2, flow_shift, steps, embedded_guidance_scale, 
                 seed, force_offload, alpha, interpolation_curve=None, feta_args=None):
+        comfy_model_patcher = model
         model = model.model
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -532,8 +546,10 @@ class HyVideoPromptMixSampler:
         )
         latent_video_length = (num_frames - 1) // 4 + 1
         freqs_cos, freqs_sin = get_rotary_pos_embed(transformer, latent_video_length, height, width)
+        freqs_cos = freqs_cos.to(device)
+        freqs_sin = freqs_sin.to(device)
 
-        pipeline.scheduler.shift = flow_shift
+        pipeline.scheduler.flow_shift = flow_shift
   
         if model["block_swap_args"] is not None:
             for name, param in transformer.named_parameters():
@@ -603,8 +619,8 @@ class HyVideoPromptMixSampler:
         # 7. Denoising loop
         self._num_timesteps = len(timesteps)
 
-        from .latent_preview import prepare_callback
-        callback = prepare_callback(transformer, steps)
+        from latent_preview import prepare_callback
+        callback = prepare_callback(comfy_model_patcher, steps)
 
         from comfy.utils import ProgressBar
         from tqdm import tqdm
@@ -695,7 +711,7 @@ class HyVideoPromptMixSampler:
 
                     progress_bar.update()
                     if callback is not None:
-                        callback(idx, latents.detach()[-1].permute(1,0,2,3), None, steps)
+                        callback(idx, (latent_model_input - noise_pred * t / 1000).detach()[0].permute(1,0,2,3), None, steps)
                     else:
                         comfy_pbar.update(1)
 
@@ -712,7 +728,7 @@ class HyVideoPromptMixSampler:
                 gc.collect()
 
         return ({
-            "samples": latents
+            "samples": latents / VAE_SCALING_FACTOR
             },)
 
 NODE_CLASS_MAPPINGS = {

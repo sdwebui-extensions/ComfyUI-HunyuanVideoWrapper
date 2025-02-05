@@ -29,6 +29,7 @@ from diffusers.utils import (
 )
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from diffusers.schedulers import DPMSolverMultistepScheduler
 
 from ...modules import HYVideoDiffusionTransformer
 from comfy.utils import ProgressBar
@@ -173,6 +174,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         self,
         transformer: HYVideoDiffusionTransformer,
         scheduler: KarrasDiffusionSchedulers,
+        comfy_model = None,
         progress_bar_config: Dict[str, Any] = None,
         base_dtype = torch.bfloat16,
     ):
@@ -186,6 +188,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         self._progress_bar_config.update(progress_bar_config)
 
         self.base_dtype = base_dtype
+        self.comfy_model = comfy_model
         # ==========================================================================================
 
         self.register_modules(
@@ -234,7 +237,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         denoise_strength=1.0,
         freenoise=False, 
         context_size=None, 
-        context_overlap=None
+        context_overlap=None,
+        leapfusion_img2vid=False
     ):
         shape = (
             batch_size,
@@ -283,9 +287,13 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 # apply shuffled indexes
                 #print("place_idx:", place_idx, "delta:", delta, "list_idx:", list_idx)
                 noise[:, :, place_idx:place_idx + delta, :, :] = noise[:, :, list_idx, :, :]
+
         if latents is None:
             latents = noise
-        else:
+        elif leapfusion_img2vid:
+            noise[:, :, [0,], :, :] = latents[:, :, [0,], :, :].to(noise)
+            latents = noise.to(device)
+        elif denoise_strength < 1.0:
             latents = latents.to(device)
             timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, denoise_strength, device)
             latent_timestep = timesteps[:1]
@@ -299,9 +307,9 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 self.additional_frames = repeat_factor
             elif frames_needed < current_frames:
                 latents = latents[:, :frames_needed, :, :, :]
-            print(timesteps)
-
             latents = latents * (1 - latent_timestep / 1000) + latent_timestep / 1000 * noise
+        else:
+            latents = latents.to(device)
 
         # Check existence to make it compatible with FlowMatchEulerDiscreteScheduler
         if hasattr(self.scheduler, "init_noise_sigma"):
@@ -418,6 +426,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         stg_end_percent: Optional[float] = 1.0,
         context_options: Optional[Dict[str, Any]] = None,
         feta_args: Optional[Dict] = None,
+        leapfusion_img2vid: Optional[bool] = False,
         **kwargs,
     ):
         r"""
@@ -594,11 +603,16 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             freqs_cos, freqs_sin = get_rotary_pos_embed(
                 self.transformer, latent_video_length, height, width
             )
+        if not self.transformer.upcast_rope:
+            freqs_cos = freqs_cos.to(self.base_dtype).to(device)
+            freqs_sin = freqs_sin.to(self.base_dtype).to(device)
+        else:
+            freqs_cos = freqs_cos.to(device)
+            freqs_sin = freqs_sin.to(device)
         
-        freqs_cos = freqs_cos.to(self.base_dtype).to(device)
-        freqs_sin = freqs_sin.to(self.base_dtype).to(device)
-        
-
+        if leapfusion_img2vid:
+            logger.info("Single input latent frame detected, LeapFusion img2vid enabled")
+            original_latents = latents
         # 5. Prepare latent variables
         num_channels_latents = self.transformer.config.in_channels
         latents, timesteps = self.prepare_latents(
@@ -615,7 +629,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             denoise_strength=denoise_strength,
             freenoise=freenoise,
             context_size=context_frames,
-            context_overlap=context_overlap
+            context_overlap=context_overlap,
+            leapfusion_img2vid=leapfusion_img2vid
         )
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
@@ -629,8 +644,10 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         self._num_timesteps = len(timesteps)
 
         # 8. Preview callback
-        from ....latent_preview import prepare_callback
-        callback = prepare_callback(self.transformer, num_inference_steps)
+        from latent_preview import prepare_callback
+        callback = prepare_callback(self.comfy_model, num_inference_steps)
+
+        #print(self.scheduler.sigmas)
 
         
         logger.info(f"Sampling {video_length} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")
@@ -685,6 +702,10 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 t_expand = t.repeat(latent_model_input.shape[0])
+
+                if leapfusion_img2vid:
+                    latent_model_input[:, :, [0,], :, :] = original_latents[:, :, [0,], :, :].to(latent_model_input)
+
                 if embedded_guidance_scale is not None and not cfg_enabled:
                     guidance_expand = (
                         torch.tensor(
@@ -787,13 +808,19 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                     if progress_bar is not None:
                         progress_bar.update()
                     if callback is not None:
-                        callback(i, latents.detach()[-1].permute(1,0,2,3), None, num_inference_steps)
+                        if leapfusion_img2vid:
+                            callback_latent = (latent_model_input[:, :, 1:, :, :] - noise_pred[:, :, 1:, :, :] * t / 1000).detach()[0].permute(1,0,2,3)
+                        else:
+                            callback_latent = (latent_model_input - noise_pred * t / 1000).detach()[0].permute(1,0,2,3)
+                        callback(
+                            i, 
+                            callback_latent,
+                            None, 
+                            num_inference_steps
+                        )
                     else:
                         comfy_pbar.update(1)
 
-        #latents = (latents / 2 + 0.5).clamp(0, 1).cpu()
-
-        # Offload all models
-        #self.maybe_free_model_hooks()
-
+        if leapfusion_img2vid:
+            latents = latents[:, :, 1:, :, :]
         return latents

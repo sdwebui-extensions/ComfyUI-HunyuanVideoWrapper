@@ -10,6 +10,33 @@ from .hyvideo.constants import PROMPT_TEMPLATE
 from .hyvideo.text_encoder import TextEncoder
 from .hyvideo.utils.data_utils import align_to
 from .hyvideo.diffusion.schedulers import FlowMatchDiscreteScheduler
+
+from .hyvideo.diffusion.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
+from .hyvideo.diffusion.schedulers.scheduling_sasolver import SASolverScheduler
+from. hyvideo.diffusion.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
+
+# from diffusers.schedulers import ( 
+#     DDIMScheduler, 
+#     PNDMScheduler, 
+#     DPMSolverMultistepScheduler, 
+#     EulerDiscreteScheduler, 
+#     EulerAncestralDiscreteScheduler,
+#     UniPCMultistepScheduler,
+#     HeunDiscreteScheduler,
+#     SASolverScheduler,
+#     DEISMultistepScheduler,
+#     LCMScheduler
+#     )
+
+scheduler_mapping = {
+    "FlowMatchDiscreteScheduler": FlowMatchDiscreteScheduler,
+    "SDE-DPMSolverMultistepScheduler": DPMSolverMultistepScheduler,
+    "DPMSolverMultistepScheduler": DPMSolverMultistepScheduler,
+    "SASolverScheduler": SASolverScheduler,
+    "UniPCMultistepScheduler": UniPCMultistepScheduler,
+}
+
+available_schedulers = list(scheduler_mapping.keys())
 from .hyvideo.diffusion.pipelines import HunyuanVideoPipeline
 from .hyvideo.vae.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
 from .hyvideo.modules.models import HYVideoDiffusionTransformer
@@ -25,6 +52,20 @@ import comfy.model_base
 import comfy.latent_formats
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
+
+VAE_SCALING_FACTOR = 0.476986
+
+def add_noise_to_reference_video(image, ratio=None):
+    if ratio is None:
+        sigma = torch.normal(mean=-3.0, std=0.5, size=(image.shape[0],)).to(image.device)
+        sigma = torch.exp(sigma).to(image.dtype)
+    else:
+        sigma = torch.ones((image.shape[0],)).to(image.device, image.dtype) * ratio
+    
+    image_noise = torch.randn_like(image) * sigma[:, None, None, None, None]
+    image_noise = torch.where(image==-1, torch.zeros_like(image), image_noise)
+    image = image + image_noise
+    return image
 
 def filter_state_dict_by_blocks(state_dict, blocks_mapping):
     filtered_dict = {}
@@ -175,6 +216,27 @@ class HyVideoSTG:
     def setargs(self, **kwargs):
         return (kwargs, )
 
+class HyVideoTeaCache:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "rel_l1_thresh": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01,
+                                            "tooltip": "Higher values will make TeaCache more aggressive, faster, but may cause artifacts"}),
+            },
+        }
+    RETURN_TYPES = ("TEACACHEARGS",)
+    RETURN_NAMES = ("teacache_args",)
+    FUNCTION = "process"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "TeaCache settings for HunyuanVideo to speed up inference"
+
+    def process(self, rel_l1_thresh):
+        teacache_args = {
+            "rel_l1_thresh": rel_l1_thresh,
+        }
+        return (teacache_args,)
+
 
 class HyVideoModel(comfy.model_base.BaseModel):
     def __init__(self, *args, **kwargs):
@@ -192,7 +254,7 @@ class HyVideoModelConfig:
     def __init__(self, dtype):
         self.unet_config = {}
         self.unet_extra_config = {}
-        self.latent_format = comfy.latent_formats.LatentFormat()
+        self.latent_format = comfy.latent_formats.HunyuanVideo
         self.latent_format.latent_channels = 16
         self.manual_cast_dtype = dtype
         self.sampling_settings = {"multiplier": 1.0}
@@ -225,6 +287,7 @@ class HyVideoModelLoader:
                 "block_swap_args": ("BLOCKSWAPARGS", ),
                 "lora": ("HYVIDLORA", {"default": None}),
                 "auto_cpu_offload": ("BOOLEAN", {"default": False, "tooltip": "Enable auto offloading for reduced VRAM usage, implementation from DiffSynth-Studio, slightly different from block swapping and uses even less VRAM, but can be slower as you can't define how much VRAM to use"}),
+                "upcast_rope": ("BOOLEAN", {"default": True, "tooltip": "Upcast RoPE to fp32 for better accuracy, this is the default behaviour, disabling can improve speed and reduce memory use slightly"}),
             }
         }
 
@@ -234,7 +297,7 @@ class HyVideoModelLoader:
     CATEGORY = "HunyuanVideoWrapper"
 
     def loadmodel(self, model, base_precision, load_device,  quantization,
-                  compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, auto_cpu_offload=False):
+                  compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, auto_cpu_offload=False, upcast_rope=True):
         transformer = None
         #mm.unload_all_models()
         mm.soft_empty_cache()
@@ -278,21 +341,29 @@ class HyVideoModelLoader:
             )
         transformer.eval()
 
+        transformer.upcast_rope = upcast_rope
+
         comfy_model = HyVideoModel(
             HyVideoModelConfig(base_dtype),
             model_type=comfy.model_base.ModelType.FLOW,
             device=device,
-        )
-        scheduler = FlowMatchDiscreteScheduler(
-            shift=9.0,
-            reverse=True,
-            solver="euler",
-        )
+        )        
+        
+        scheduler_config = {
+            "flow_shift": 9.0,
+            "reverse": True,
+            "solver": "euler",
+            "use_flow_sigmas": True, 
+            "prediction_type": 'flow_prediction'
+        }
+        scheduler = FlowMatchDiscreteScheduler.from_config(scheduler_config)
+        
         pipe = HunyuanVideoPipeline(
             transformer=transformer,
             scheduler=scheduler,
             progress_bar_config=None,
-            base_dtype=base_dtype
+            base_dtype=base_dtype,
+            comfy_model=comfy_model,
         )
 
         if not "torchao" in quantization:
@@ -308,6 +379,7 @@ class HyVideoModelLoader:
 
             comfy_model.diffusion_model = transformer
             patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, offload_device)
+            pipe.comfy_model = patcher
 
             del sd
             gc.collect()
@@ -445,6 +517,11 @@ class HyVideoModelLoader:
         patcher.model["quantization"] = "disabled"
         patcher.model["block_swap_args"] = block_swap_args
         patcher.model["auto_cpu_offload"] = auto_cpu_offload
+        patcher.model["scheduler_config"] = scheduler_config
+
+        for model in mm.current_loaded_models:
+            if model._model() == patcher:
+                mm.current_loaded_models.remove(model)            
 
         return (patcher,)
 
@@ -557,6 +634,7 @@ class DownloadAndLoadHyVideoTextEncoder:
                 "apply_final_norm": ("BOOLEAN", {"default": False}),
                 "hidden_state_skip_layer": ("INT", {"default": 2}),
                 "quantization": (['disabled', 'bnb_nf4', "fp8_e4m3fn"], {"default": 'disabled'}),
+                "load_device": (["main_device", "offload_device"], {"default": "offload_device"}),
             }
         }
 
@@ -566,7 +644,7 @@ class DownloadAndLoadHyVideoTextEncoder:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Loads Hunyuan text_encoder model from 'ComfyUI/models/LLM'"
 
-    def loadmodel(self, llm_model, clip_model, precision,  apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled"):
+    def loadmodel(self, llm_model, clip_model, precision,  apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled", load_device="offload_device"):
         lm_type_mapping = {
             "Kijai/llava-llama-3-8b-text-encoder-tokenizer": "llm",
             "xtuner/llava-llama-3-8b-v1_1-transformers": "vlm",
@@ -574,6 +652,9 @@ class DownloadAndLoadHyVideoTextEncoder:
         lm_type = lm_type_mapping[llm_model]
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+
+        text_encoder_load_device = device if load_device == "main_device" else offload_device
+
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
         quantization_config = None
         if quantization == "bnb_nf4":
@@ -608,7 +689,7 @@ class DownloadAndLoadHyVideoTextEncoder:
             text_encoder_precision=precision,
             tokenizer_type="clipL",
             logger=log,
-            device=device,
+            device=text_encoder_load_device,
         )
         else:
             text_encoder_2 = None
@@ -634,7 +715,7 @@ class DownloadAndLoadHyVideoTextEncoder:
             hidden_state_skip_layer=hidden_state_skip_layer,
             apply_final_norm=apply_final_norm,
             logger=log,
-            device=device,
+            device=text_encoder_load_device,
             dtype=dtype,
             quantization_config=quantization_config
         )
@@ -1023,10 +1104,10 @@ class HyVideoContextOptions:
             }
         }
 
-    RETURN_TYPES = ("COGCONTEXT", )
+    RETURN_TYPES = ("HYVIDCONTEXT", )
     RETURN_NAMES = ("context_options",)
     FUNCTION = "process"
-    CATEGORY = "CogVideoWrapper"
+    CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Context options for HunyuanVideo, allows splitting the video into context windows and attemps blending them for longer generations than the model and memory otherwise would allow."
 
     def process(self, context_schedule, context_frames, context_stride, context_overlap, freenoise):
@@ -1061,8 +1142,13 @@ class HyVideoSampler:
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "stg_args": ("STGARGS", ),
-                "context_options": ("COGCONTEXT", ),
+                "context_options": ("HYVIDCONTEXT", ),
                 "feta_args": ("FETAARGS", ),
+                "teacache_args": ("TEACACHEARGS", ),
+                "scheduler": (available_schedulers,
+                    {
+                        "default": 'FlowMatchDiscreteScheduler'
+                    }),
             }
         }
 
@@ -1072,7 +1158,7 @@ class HyVideoSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
-                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None):
+                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, teacache_args=None, scheduler=None):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1095,6 +1181,9 @@ class HyVideoSampler:
             cfg = 1.0
             cfg_start_percent = 0.0
             cfg_end_percent = 1.0
+        
+        if embedded_guidance_scale == 0.0:
+            embedded_guidance_scale = None
 
         generator = torch.Generator(device=torch.device("cpu")).manual_seed(seed)
 
@@ -1114,7 +1203,19 @@ class HyVideoSampler:
         target_height = align_to(height, 16)
         target_width = align_to(width, 16)
 
-        model["pipe"].scheduler.shift = flow_shift
+        scheduler_config = model["scheduler_config"]
+
+        scheduler_config["flow_shift"] = flow_shift
+        if scheduler == "SDE-DPMSolverMultistepScheduler":
+            scheduler_config["algorithm_type"] = "sde-dpmsolver++"
+        elif scheduler == "SASolverScheduler":
+            scheduler_config["algorithm_type"] = "data_prediction"
+        else:
+            scheduler_config.pop("algorithm_type", None)
+        #model["scheduler_config"]["use_beta_flow_sigmas"] = True
+        
+        noise_scheduler = scheduler_mapping[scheduler].from_config(scheduler_config)
+        model["pipe"].scheduler = noise_scheduler
 
         if model["block_swap_args"] is not None:
             for name, param in transformer.named_parameters():
@@ -1134,6 +1235,27 @@ class HyVideoSampler:
         elif model["manual_offloading"]:
             transformer.to(device)
 
+        # Initialize TeaCache if enabled
+        if teacache_args is not None:
+            # Check if dimensions have changed since last run
+            if (not hasattr(transformer, 'last_dimensions') or
+                    transformer.last_dimensions != (height, width, num_frames) or
+                    not hasattr(transformer, 'last_frame_count') or
+                    transformer.last_frame_count != num_frames):
+                # Reset TeaCache state on dimension change
+                transformer.cnt = 0
+                transformer.accumulated_rel_l1_distance = 0
+                transformer.previous_modulated_input = None
+                transformer.previous_residual = None
+                transformer.last_dimensions = (height, width, num_frames)
+                transformer.last_frame_count = num_frames
+
+            transformer.enable_teacache = True
+            transformer.num_steps = steps
+            transformer.rel_l1_thresh = teacache_args["rel_l1_thresh"]
+        else:
+            transformer.enable_teacache = False
+
         mm.soft_empty_cache()
         gc.collect()
 
@@ -1145,6 +1267,14 @@ class HyVideoSampler:
         #for name, param in transformer.named_parameters():
         #    print(name, param.data.device)
 
+        leapfusion_img2vid = False
+        if samples is not None:
+            input_latents = samples["samples"] * VAE_SCALING_FACTOR
+            if input_latents.shape[2] == 1:
+                leapfusion_img2vid = True
+        else:
+            input_latents = None            
+
         out_latents = model["pipe"](
             num_inference_steps=steps,
             height = target_height,
@@ -1154,7 +1284,7 @@ class HyVideoSampler:
             cfg_start_percent=cfg_start_percent,
             cfg_end_percent=cfg_end_percent,
             embedded_guidance_scale=embedded_guidance_scale,
-            latents=samples["samples"] if samples is not None else None,
+            latents=input_latents,
             denoise_strength=denoise_strength,
             prompt_embed_dict=hyvid_embeds,
             generator=generator,
@@ -1165,6 +1295,7 @@ class HyVideoSampler:
             stg_end_percent=stg_args["stg_end_percent"] if stg_args is not None else 1.0,
             context_options=context_options,
             feta_args=feta_args,
+            leapfusion_img2vid = leapfusion_img2vid
         )
 
         print_memory(device)
@@ -1180,7 +1311,7 @@ class HyVideoSampler:
                 gc.collect()
 
         return ({
-            "samples": out_latents
+            "samples": out_latents.cpu() / VAE_SCALING_FACTOR
             },)
 
 #region VideoDecode
@@ -1235,8 +1366,7 @@ class HyVideoDecode:
             raise ValueError(
                 f"Only support latents with shape (b, c, h, w) or (b, c, f, h, w), but got {latents.shape}."
             )
-
-        latents = latents / vae.config.scaling_factor
+        #latents = latents / vae.config.scaling_factor
         latents = latents.to(vae.dtype).to(device)
 
         if enable_vae_tiling:
@@ -1279,6 +1409,10 @@ class HyVideoEncode:
                     "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
                     "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
                     },
+                    "optional": {
+                        "noise_aug_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Strength of noise augmentation, helpful for leapfusion I2V where some noise can add motion and give sharper results"}),
+                        "latent_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Additional latent multiplier, helpful for leapfusion I2V where lower values allow for more motion"}),
+                    }
                 }
 
     RETURN_TYPES = ("LATENT",)
@@ -1286,7 +1420,7 @@ class HyVideoEncode:
     FUNCTION = "encode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, spatial_tile_sample_min_size):
+    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, spatial_tile_sample_min_size, noise_aug_strength=0.0, latent_strength=1.0):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
@@ -1306,11 +1440,16 @@ class HyVideoEncode:
             vae.tile_sample_min_size = 256
             vae.tile_latent_min_size = 32
 
-        image = (image * 2.0 - 1.0).to(vae.dtype).to(device).unsqueeze(0).permute(0, 4, 1, 2, 3) # B, C, T, H, W
+        image = (image.clone() * 2.0 - 1.0).to(vae.dtype).to(device).unsqueeze(0).permute(0, 4, 1, 2, 3) # B, C, T, H, W
+        if noise_aug_strength > 0.0:
+            image = add_noise_to_reference_video(image, ratio=noise_aug_strength)
+        
         if enable_vae_tiling:
             vae.enable_tiling()
         latents = vae.encode(image).latent_dist.sample(generator)
-        latents = latents * vae.config.scaling_factor
+        if latent_strength != 1.0:
+            latents *= latent_strength
+        #latents = latents * vae.config.scaling_factor
         vae.to(offload_device)
         print("encoded latents shape",latents.shape)
 
@@ -1413,6 +1552,7 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoTextEmbedsLoad": HyVideoTextEmbedsLoad,
     "HyVideoContextOptions": HyVideoContextOptions,
     "HyVideoEnhanceAVideo": HyVideoEnhanceAVideo,
+    "HyVideoTeaCache": HyVideoTeaCache,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1435,4 +1575,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoTextEmbedsLoad": "HunyuanVideo TextEmbeds Load",
     "HyVideoContextOptions": "HunyuanVideo Context Options",
     "HyVideoEnhanceAVideo": "HunyuanVideo Enhance A Video",
+    "HyVideoTeaCache": "HunyuanVideo TeaCache",
     }
