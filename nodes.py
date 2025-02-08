@@ -1263,12 +1263,12 @@ class HyVideoSampler:
         #    print(name, param.data.device)
 
         leapfusion_img2vid = False
-        if samples is not None:
-            input_latents = samples["samples"] * VAE_SCALING_FACTOR
+        input_latents = samples["samples"] if samples is not None else None
+        if input_latents is not None:
             if input_latents.shape[2] == 1:
                 leapfusion_img2vid = True
-        else:
-            input_latents = None            
+            if denoise_strength < 1.0:
+                input_latents *= VAE_SCALING_FACTOR
 
         out_latents = model["pipe"](
             num_inference_steps=steps,
