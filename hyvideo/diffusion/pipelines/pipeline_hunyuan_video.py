@@ -723,7 +723,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
 
                 if image_cond_latents is not None:
                     latent_image_input = (
-                        torch.cat([image_latents] * 2) if self.do_classifier_free_guidance else image_latents
+                        torch.cat([image_latents] * 2) if cfg_enabled else image_latents
                     )
                     latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=1)
 
