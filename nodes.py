@@ -1275,7 +1275,7 @@ class HyVideoSampler:
         #    print(name, param.data.device)
 
         leapfusion_img2vid = False
-        input_latents = samples["samples"] if samples is not None else None
+        input_latents = samples["samples"].clone() if samples is not None else None
         if input_latents is not None:
             if input_latents.shape[2] == 1:
                 leapfusion_img2vid = True
