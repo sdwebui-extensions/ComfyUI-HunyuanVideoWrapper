@@ -727,16 +727,16 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                     )
                     latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=1)
 
-                if embedded_guidance_scale is not None and not cfg_enabled:
+                if self.do_classifier_free_guidance:
                     guidance_expand = (
-                        torch.tensor(
-                            [embedded_guidance_scale] * latent_model_input.shape[0],
-                            dtype=self.base_dtype,
-                            device=device,
-                        ) * 1000.0
+                        torch.tensor([embedded_guidance_scale] * latents.shape[0] * 2, dtype=self.base_dtype, device=device)
+                        * 1000.0
                     )
                 else:
-                    guidance_expand = None
+                    guidance_expand = (
+                        torch.tensor([embedded_guidance_scale] * latents.shape[0], dtype=self.base_dtype, device=device)
+                        * 1000.0
+                    )
 
                 if use_context_schedule:
                     counter = torch.zeros_like(latent_model_input)

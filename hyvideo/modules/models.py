@@ -967,7 +967,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         img_seq_len = img.shape[1]
         max_seqlen_q = max_seqlen_kv = img_seq_len + txt_seq_len
 
-        if self.attention_mode == "sdpa" or self.attention_mode == "comfy":
+        if "varlen" not in self.attention_mode:
             cu_seqlens_q, cu_seqlens_kv = None, None
             # Create a square boolean mask filled with False
             attn_mask = torch.zeros((1, max_seqlen_q, max_seqlen_q), dtype=torch.bool, device=text_mask.device)
