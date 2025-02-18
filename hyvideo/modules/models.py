@@ -931,10 +931,6 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
             self.previous_residual = None
             self.last_dims = current_dims
 
-        out = {}
-        img = x
-        txt = text_states
-
         # Prepare modulation vectors.
         vec = self.time_in(t)
 
