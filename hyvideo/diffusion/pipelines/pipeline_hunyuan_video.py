@@ -402,6 +402,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         guidance_scale: float = 1.0,
         cfg_start_percent: float = 0.0,
         cfg_end_percent: float = 1.0,
+        batched_cfg: bool = True,
         num_videos_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         denoise_strength: float = 1.0,
@@ -663,9 +664,9 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         callback = prepare_callback(self.comfy_model, num_inference_steps)
 
         #print(self.scheduler.sigmas)
-
         
         logger.info(f"Sampling {video_length} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")
+    
         comfy_pbar = ProgressBar(len(timesteps))
         with self.progress_bar(total=len(timesteps)) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -771,39 +772,72 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                     with torch.autocast(
                         device_type="cuda", dtype=self.base_dtype, enabled=True
                     ):
-                        noise_pred = self.transformer(  # For an input image (129, 192, 336) (1, 256, 256)
-                            latent_model_input,  # [2, 16, 33, 24, 42]
-                            t_expand,  # [2]
-                            text_states=input_prompt_embeds,  # [2, 256, 4096]
-                            text_mask=input_prompt_mask,  # [2, 256]
-                            text_states_2=input_prompt_embeds_2,  # [2, 768]
-                            freqs_cos=freqs_cos,  # [seqlen, head_dim]
-                            freqs_sin=freqs_sin,  # [seqlen, head_dim]
-                            guidance=guidance_expand,
-                            stg_block_idx=stg_block_idx,
-                            stg_mode=stg_mode,
-                            return_dict=True,
-                        )["x"]
+                        if batched_cfg or not cfg_enabled:
+                            noise_pred = self.transformer(  # For an input image (129, 192, 336) (1, 256, 256)
+                                latent_model_input,  # [2, 16, 33, 24, 42]
+                                t_expand,  # [2]
+                                text_states=input_prompt_embeds,  # [2, 256, 4096]
+                                text_mask=input_prompt_mask,  # [2, 256]
+                                text_states_2=input_prompt_embeds_2,  # [2, 768]
+                                freqs_cos=freqs_cos,  # [seqlen, head_dim]
+                                freqs_sin=freqs_sin,  # [seqlen, head_dim]
+                                guidance=guidance_expand,
+                                stg_block_idx=stg_block_idx,
+                                stg_mode=stg_mode,
+                                return_dict=True,
+                            )["x"]
+                        else:
+                            uncond = self.transformer(
+                                latent_model_input[0].unsqueeze(0),
+                                t_expand[0].unsqueeze(0),
+                                text_states=input_prompt_embeds[0].unsqueeze(0), 
+                                text_mask=input_prompt_mask[0].unsqueeze(0), 
+                                text_states_2=input_prompt_embeds_2[0].unsqueeze(0), 
+                                freqs_cos=freqs_cos,
+                                freqs_sin=freqs_sin,
+                                guidance=guidance_expand[0].unsqueeze(0),
+                                stg_block_idx=stg_block_idx,
+                                stg_mode=stg_mode,
+                                return_dict=True,
+                            )["x"]
+                            cond = self.transformer(
+                                latent_model_input[1].unsqueeze(0),
+                                t_expand[1].unsqueeze(0),
+                                text_states=input_prompt_embeds[1].unsqueeze(0), 
+                                text_mask=input_prompt_mask[1].unsqueeze(0), 
+                                text_states_2=input_prompt_embeds_2[1].unsqueeze(0), 
+                                freqs_cos=freqs_cos,
+                                freqs_sin=freqs_sin,
+                                guidance=guidance_expand[1].unsqueeze(0),
+                                stg_block_idx=stg_block_idx,
+                                stg_mode=stg_mode,
+                                return_dict=True,
+                            )["x"]
 
-                    # perform guidance
-                    if cfg_enabled and not self.do_spatio_temporal_guidance:
-                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                        noise_pred = noise_pred_uncond + self.guidance_scale * (
-                            noise_pred_text - noise_pred_uncond
-                        )
-                    elif self.do_classifier_free_guidance and self.do_spatio_temporal_guidance:
-                        raise NotImplementedError
-                        noise_pred_uncond, noise_pred_text, noise_pred_perturb = noise_pred.chunk(3)
-                        noise_pred = noise_pred_uncond + self.guidance_scale * (
-                            noise_pred_text - noise_pred_uncond
-                        ) + self._stg_scale * (
-                            noise_pred_text - noise_pred_perturb
-                        )
-                    elif self.do_spatio_temporal_guidance and stg_enabled:
-                        noise_pred_text, noise_pred_perturb = noise_pred.chunk(2)
-                        noise_pred = noise_pred_text + self._stg_scale * (
-                            noise_pred_text - noise_pred_perturb
-                        )
+                        # perform guidance
+                        if cfg_enabled and not self.do_spatio_temporal_guidance:
+                            if batched_cfg:
+                                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                                noise_pred = noise_pred_uncond + self.guidance_scale * (
+                                    noise_pred_text - noise_pred_uncond
+                                )
+                            else:
+                                noise_pred = uncond + self.guidance_scale * (cond - uncond)
+                        
+            
+                        elif self.do_classifier_free_guidance and self.do_spatio_temporal_guidance:
+                            raise NotImplementedError
+                            noise_pred_uncond, noise_pred_text, noise_pred_perturb = noise_pred.chunk(3)
+                            noise_pred = noise_pred_uncond + self.guidance_scale * (
+                                noise_pred_text - noise_pred_uncond
+                            ) + self._stg_scale * (
+                                noise_pred_text - noise_pred_perturb
+                            )
+                        elif self.do_spatio_temporal_guidance and stg_enabled:
+                            noise_pred_text, noise_pred_perturb = noise_pred.chunk(2)
+                            noise_pred = noise_pred_text + self._stg_scale * (
+                                noise_pred_text - noise_pred_perturb
+                            )
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(

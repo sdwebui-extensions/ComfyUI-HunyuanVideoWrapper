@@ -965,6 +965,7 @@ class HyVideoTextEncode:
                 "cfg": torch.tensor(hyvid_cfg["cfg"]) if hyvid_cfg is not None else None,
                 "start_percent": torch.tensor(hyvid_cfg["start_percent"]) if hyvid_cfg is not None else None,
                 "end_percent": torch.tensor(hyvid_cfg["end_percent"]) if hyvid_cfg is not None else None,
+                "batched_cfg": torch.tensor(hyvid_cfg["batched_cfg"]) if hyvid_cfg is not None else None,
             }
         return (prompt_embeds_dict,)
 
@@ -1003,6 +1004,7 @@ class HyVideoCFG:
             "cfg": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 100.0, "step": 0.01, "tooltip": "guidance scale"} ),
             "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percentage of the steps to apply CFG, rest of the steps use guidance_embeds"} ),
             "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percentage of the steps to apply CFG, rest of the steps use guidance_embeds"} ),
+            "batched_cfg": ("BOOLEAN", {"default": True, "tooltip": "Calculate cond and uncond as a batch, increases memory usage but can be faster"}),
             },
         }
 
@@ -1012,12 +1014,13 @@ class HyVideoCFG:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "To use CFG with HunyuanVideo"
 
-    def process(self, negative_prompt, cfg, start_percent, end_percent):
+    def process(self, negative_prompt, cfg, start_percent, end_percent, batched_cfg):
         cfg_dict = {
             "negative_prompt": negative_prompt,
             "cfg": cfg,
             "start_percent": start_percent,
             "end_percent": end_percent,
+            "batched_cfg": batched_cfg
         }
         
         return (cfg_dict,)
@@ -1095,6 +1098,7 @@ class HyVideoTextEmbedsLoad:
             "cfg": loaded_tensors.get("cfg", None),
             "start_percent": loaded_tensors.get("start_percent", None),
             "end_percent": loaded_tensors.get("end_percent", None),
+            "batched_cfg": loaded_tensors.get("batched_cfg", None),
         }
         
         return (prompt_embeds_dict,)
@@ -1185,10 +1189,12 @@ class HyVideoSampler:
             cfg = float(hyvid_embeds.get("cfg", 1.0))
             cfg_start_percent = float(hyvid_embeds.get("start_percent", 0.0))
             cfg_end_percent = float(hyvid_embeds.get("end_percent", 1.0))
+            batched_cfg = hyvid_embeds.get("batched_cfg", True)
         else:
             cfg = 1.0
             cfg_start_percent = 0.0
             cfg_end_percent = 1.0
+            batched_cfg = False
         
         if embedded_guidance_scale == 0.0:
             embedded_guidance_scale = None
@@ -1291,6 +1297,7 @@ class HyVideoSampler:
             guidance_scale=cfg,
             cfg_start_percent=cfg_start_percent,
             cfg_end_percent=cfg_end_percent,
+            batched_cfg=batched_cfg,
             embedded_guidance_scale=embedded_guidance_scale,
             latents=input_latents,
             denoise_strength=denoise_strength,
