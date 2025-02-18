@@ -427,6 +427,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         context_options: Optional[Dict[str, Any]] = None,
         feta_args: Optional[Dict] = None,
         leapfusion_img2vid: Optional[bool] = False,
+        image_cond_latents: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         r"""
@@ -576,6 +577,19 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             enable_enhance(feta_args["single_blocks"], feta_args["double_blocks"])
         else:
             disable_enhance()
+
+        if image_cond_latents is not None:
+            padding_shape = (
+                batch_size,
+                16,
+                latent_video_length - 1,
+                int(height) // 8,
+                int(width) // 8,
+            )
+            latent_padding = torch.zeros(padding_shape, device=device, dtype=self.base_dtype)
+            image_latents = torch.cat([image_cond_latents, latent_padding], dim=2)
+            print("image_cond_latents shape:", image_cond_latents.shape)
+            print("image_latents shape:", image_latents.shape)
         
 
         #  context windows
@@ -614,7 +628,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             logger.info("Single input latent frame detected, LeapFusion img2vid enabled")
             original_latents = latents
         # 5. Prepare latent variables
-        num_channels_latents = self.transformer.config.in_channels
+        #num_channels_latents = self.transformer.config.in_channels
+        num_channels_latents = 16
         latents, timesteps = self.prepare_latents(
             batch_size * num_videos_per_prompt,
             num_channels_latents,
@@ -705,6 +720,14 @@ class HunyuanVideoPipeline(DiffusionPipeline):
 
                 if leapfusion_img2vid:
                     latent_model_input[:, :, [0,], :, :] = original_latents[:, :, [0,], :, :].to(latent_model_input)
+
+                if image_cond_latents is not None:
+                    latent_image_input = (
+                        torch.cat([image_latents] * 2) if self.do_classifier_free_guidance else image_latents
+                    )
+                    print("latent_image_input", latent_image_input.shape)
+                    print("latent_model_input", latent_model_input.shape)
+                    latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=1)
 
                 if embedded_guidance_scale is not None and not cfg_enabled:
                     guidance_expand = (
@@ -811,7 +834,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                         if leapfusion_img2vid:
                             callback_latent = (latent_model_input[:, :, 1:, :, :] - noise_pred[:, :, 1:, :, :] * t / 1000).detach()[0].permute(1,0,2,3)
                         else:
-                            callback_latent = (latent_model_input - noise_pred * t / 1000).detach()[0].permute(1,0,2,3)
+                            callback_latent = (latent_model_input[:, :16, :, :, :] - noise_pred * t / 1000).detach()[0].permute(1,0,2,3)
                         callback(
                             i, 
                             callback_latent,

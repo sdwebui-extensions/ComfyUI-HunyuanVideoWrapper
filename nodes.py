@@ -326,7 +326,9 @@ class HyVideoModelLoader:
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
         sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
 
-        in_channels = out_channels = 16
+        in_channels = sd["img_in.proj.weight"].shape[1]
+
+        out_channels = 16
         factor_kwargs = {"device": transformer_load_device, "dtype": base_dtype}
         HUNYUAN_VIDEO_CONFIG = {
             "mm_double_blocks_depth": 20,
@@ -382,6 +384,7 @@ class HyVideoModelLoader:
                 dtype = base_dtype
             params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
             for name, param in transformer.named_parameters():
+                #print("Assigning Parameter name: ", name)
                 dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else dtype
                 set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=sd[name])
 
@@ -1143,6 +1146,7 @@ class HyVideoSampler:
             },
             "optional": {
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
+                "image_cond_latents": ("LATENT", {"tooltip": "init Latents to use for image2video process"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "stg_args": ("STGARGS", ),
                 "context_options": ("HYVIDCONTEXT", ),
@@ -1161,7 +1165,7 @@ class HyVideoSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
-                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, teacache_args=None, scheduler=None):
+                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, teacache_args=None, scheduler=None, image_cond_latents=None):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1298,7 +1302,8 @@ class HyVideoSampler:
             stg_end_percent=stg_args["stg_end_percent"] if stg_args is not None else 1.0,
             context_options=context_options,
             feta_args=feta_args,
-            leapfusion_img2vid = leapfusion_img2vid
+            leapfusion_img2vid = leapfusion_img2vid,
+            image_cond_latents = image_cond_latents["samples"] * VAE_SCALING_FACTOR if image_cond_latents is not None else None,
         )
 
         print_memory(device)
