@@ -86,6 +86,14 @@ def standardize_lora_key_format(lora_sd):
         # Diffusers format
         if k.startswith('transformer.'):
             k = k.replace('transformer.', 'diffusion_model.')
+        if "img_attn.proj" in k:
+            k = k.replace("img_attn.proj", "img_attn_proj")
+        if "img_attn.qkv" in k:
+            k = k.replace("img_attn.qkv", "img_attn_qkv")
+        if "txt_attn.proj" in k:
+            k = k.replace("txt_attn.proj ", "txt_attn_proj")
+        if "txt_attn.qkv" in k:
+            k = k.replace("txt_attn.qkv", "txt_attn_qkv")
         new_sd[k] = v
     return new_sd
 
@@ -273,7 +281,7 @@ class HyVideoModelLoader:
                 "model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
 
             "base_precision": (["fp32", "bf16"], {"default": "bf16"}),
-            "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_scaled', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6", "torchao_int4", "torchao_int8"], {"default": 'disabled', "tooltip": "optional quantization method"}),
+            "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_e5m2', 'fp8_scaled', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6", "torchao_int4", "torchao_int8"], {"default": 'disabled', "tooltip": "optional quantization method"}),
             "load_device": (["main_device", "offload_device"], {"default": "main_device"}),
             },
             "optional": {
@@ -281,6 +289,7 @@ class HyVideoModelLoader:
                     "sdpa",
                     "flash_attn_varlen",
                     "sageattn_varlen",
+                    "sageattn",
                     "comfy",
                     ], {"default": "flash_attn"}),
                 "compile_args": ("COMPILEARGS", ),
@@ -318,7 +327,9 @@ class HyVideoModelLoader:
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
         sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
 
-        in_channels = out_channels = 16
+        in_channels = sd["img_in.proj.weight"].shape[1]
+
+        out_channels = 16
         factor_kwargs = {"device": transformer_load_device, "dtype": base_dtype}
         HUNYUAN_VIDEO_CONFIG = {
             "mm_double_blocks_depth": 20,
@@ -370,10 +381,13 @@ class HyVideoModelLoader:
             log.info("Using accelerate to load and assign model weights to device...")
             if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast" or quantization == "fp8_scaled":
                 dtype = torch.float8_e4m3fn
+            elif quantization == "fp8_e5m2":
+                dtype = torch.float8_e5m2
             else:
                 dtype = base_dtype
             params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
             for name, param in transformer.named_parameters():
+                #print("Assigning Parameter name: ", name)
                 dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else dtype
                 set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=sd[name])
 
@@ -397,7 +411,7 @@ class HyVideoModelLoader:
                         lora_sd = filter_state_dict_by_blocks(lora_sd, l["blocks"])
 
                     #for k in lora_sd.keys():
-                     #   print(k)
+                    #   print(k)
 
                     patcher, _ = load_lora_for_models(patcher, None, lora_sd, lora_strength, 0)
 
@@ -958,6 +972,7 @@ class HyVideoTextEncode:
                 "cfg": torch.tensor(hyvid_cfg["cfg"]) if hyvid_cfg is not None else None,
                 "start_percent": torch.tensor(hyvid_cfg["start_percent"]) if hyvid_cfg is not None else None,
                 "end_percent": torch.tensor(hyvid_cfg["end_percent"]) if hyvid_cfg is not None else None,
+                "batched_cfg": torch.tensor(hyvid_cfg["batched_cfg"]) if hyvid_cfg is not None else None,
             }
         return (prompt_embeds_dict,)
 
@@ -994,8 +1009,9 @@ class HyVideoCFG:
         return {"required": {
             "negative_prompt": ("STRING", {"default": "Aerial view, aerial view, overexposed, low quality, deformation, a poor composition, bad hands, bad teeth, bad eyes, bad limbs, distortion", "multiline": True} ),
             "cfg": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 100.0, "step": 0.01, "tooltip": "guidance scale"} ),
-            "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01, "tooltip": "Start percentage of the steps to apply CFG, rest of the steps use guidance_embeds"} ),
-            "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.01, "tooltip": "End percentage of the steps to apply CFG, rest of the steps use guidance_embeds"} ),
+            "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percentage of the steps to apply CFG, rest of the steps use guidance_embeds"} ),
+            "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percentage of the steps to apply CFG, rest of the steps use guidance_embeds"} ),
+            "batched_cfg": ("BOOLEAN", {"default": True, "tooltip": "Calculate cond and uncond as a batch, increases memory usage but can be faster"}),
             },
         }
 
@@ -1005,12 +1021,13 @@ class HyVideoCFG:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "To use CFG with HunyuanVideo"
 
-    def process(self, negative_prompt, cfg, start_percent, end_percent):
+    def process(self, negative_prompt, cfg, start_percent, end_percent, batched_cfg):
         cfg_dict = {
             "negative_prompt": negative_prompt,
             "cfg": cfg,
             "start_percent": start_percent,
             "end_percent": end_percent,
+            "batched_cfg": batched_cfg
         }
         
         return (cfg_dict,)
@@ -1088,6 +1105,7 @@ class HyVideoTextEmbedsLoad:
             "cfg": loaded_tensors.get("cfg", None),
             "start_percent": loaded_tensors.get("start_percent", None),
             "end_percent": loaded_tensors.get("end_percent", None),
+            "batched_cfg": loaded_tensors.get("batched_cfg", None),
         }
         
         return (prompt_embeds_dict,)
@@ -1140,6 +1158,7 @@ class HyVideoSampler:
             },
             "optional": {
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
+                "image_cond_latents": ("LATENT", {"tooltip": "init Latents to use for image2video process"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "stg_args": ("STGARGS", ),
                 "context_options": ("HYVIDCONTEXT", ),
@@ -1158,7 +1177,7 @@ class HyVideoSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
-                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, teacache_args=None, scheduler=None):
+                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, teacache_args=None, scheduler=None, image_cond_latents=None):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1177,10 +1196,12 @@ class HyVideoSampler:
             cfg = float(hyvid_embeds.get("cfg", 1.0))
             cfg_start_percent = float(hyvid_embeds.get("start_percent", 0.0))
             cfg_end_percent = float(hyvid_embeds.get("end_percent", 1.0))
+            batched_cfg = hyvid_embeds.get("batched_cfg", True)
         else:
             cfg = 1.0
             cfg_start_percent = 0.0
             cfg_end_percent = 1.0
+            batched_cfg = False
         
         if embedded_guidance_scale == 0.0:
             embedded_guidance_scale = None
@@ -1268,12 +1289,12 @@ class HyVideoSampler:
         #    print(name, param.data.device)
 
         leapfusion_img2vid = False
-        if samples is not None:
-            input_latents = samples["samples"] * VAE_SCALING_FACTOR
+        input_latents = samples["samples"].clone() if samples is not None else None
+        if input_latents is not None:
             if input_latents.shape[2] == 1:
                 leapfusion_img2vid = True
-        else:
-            input_latents = None            
+            if denoise_strength < 1.0:
+                input_latents *= VAE_SCALING_FACTOR
 
         out_latents = model["pipe"](
             num_inference_steps=steps,
@@ -1283,6 +1304,7 @@ class HyVideoSampler:
             guidance_scale=cfg,
             cfg_start_percent=cfg_start_percent,
             cfg_end_percent=cfg_end_percent,
+            batched_cfg=batched_cfg,
             embedded_guidance_scale=embedded_guidance_scale,
             latents=input_latents,
             denoise_strength=denoise_strength,
@@ -1295,7 +1317,8 @@ class HyVideoSampler:
             stg_end_percent=stg_args["stg_end_percent"] if stg_args is not None else 1.0,
             context_options=context_options,
             feta_args=feta_args,
-            leapfusion_img2vid = leapfusion_img2vid
+            leapfusion_img2vid = leapfusion_img2vid,
+            image_cond_latents = image_cond_latents["samples"] * VAE_SCALING_FACTOR if image_cond_latents is not None else None,
         )
 
         print_memory(device)

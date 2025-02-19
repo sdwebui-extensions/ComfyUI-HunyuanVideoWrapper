@@ -9,7 +9,7 @@ except ImportError:
     flash_attn_varlen_func = None
 
 try:
-    from sageattention import sageattn_varlen
+    from sageattention import sageattn_varlen, sageattn
     @torch.compiler.disable()
     def sageattn_varlen_func(
             q,
@@ -21,6 +21,9 @@ try:
             max_seqlen_kv,
         ):
         return sageattn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
+    @torch.compiler.disable()
+    def sageattn_func(q, k, v, attn_mask=None, dropout_p=0, is_causal=False):
+        return sageattn(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
 except ImportError:
     sageattn_varlen_func = None
 
@@ -36,6 +39,10 @@ MEMORY_LAYOUT = {
         lambda x: x,
     ),
     "sdpa": (
+        lambda x: x.transpose(1, 2),
+        lambda x: x.transpose(1, 2),
+    ),
+    "sageattn": (
         lambda x: x.transpose(1, 2),
         lambda x: x.transpose(1, 2),
     ),
@@ -174,7 +181,10 @@ def attention(
         )  # reshape x to [b, s, a, d]
     elif mode == "comfy":
         x = optimized_attention(q, k, v, mask=attn_mask, heads=heads, skip_reshape=True)
-      
+    elif mode == "sageattn":
+        if attn_mask is not None and attn_mask.dtype != torch.bool:
+            attn_mask = attn_mask.to(q.dtype)
+        x = sageattn_func(q, k, v, attn_mask=attn_mask, dropout_p=drop_rate, is_causal=causal)
     elif mode == "flash_attn_varlen":
         x = flash_attn_varlen_func(
             q,

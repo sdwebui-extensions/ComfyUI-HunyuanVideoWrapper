@@ -1,4 +1,22 @@
 # ComfyUI wrapper nodes for [HunyuanVideo](https://github.com/Tencent/HunyuanVideo)
+# Update 4, the non-update:
+
+As the native implementation exists, and has support for most features by now, I will mostly stop working on these nodes for anything but it's main purpose: early access and testing of potential new features that are difficult (at least for me) to implement natively.
+
+## Some resources for native workflows:
+
+Flowedit and enhance-a-video can be found from these nodes: https://github.com/logtd/ComfyUI-HunyuanLoom
+
+TeaCache equilevant FirstBlockCache, as well as torch.compile with LoRA support: https://github.com/chengzeyi/Comfy-WaveSpeed
+
+Sageattention can be enabled by `--use-sage-attention` startup argument for ComfyUI, or with a patcher node found in [KJNodes](https://github.com/kijai/ComfyUI-KJNodes) as well as some other node packs.
+
+Leapfusion I2V can be used with my patcher node found in the KJNodes as well, example workflow: https://github.com/kijai/ComfyUI-KJNodes/blob/main/example_workflows/leapfusion_hunyuuanvideo_i2v_native_testing.json
+
+What remains missing from native implementation currently:
+- context windowing
+- direct image embed support through IP2V
+- manual memory management
 
 # Update 3:
 
