@@ -15,19 +15,6 @@ from .hyvideo.diffusion.schedulers.scheduling_dpmsolver_multistep import DPMSolv
 from .hyvideo.diffusion.schedulers.scheduling_sasolver import SASolverScheduler
 from. hyvideo.diffusion.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
 
-# from diffusers.schedulers import ( 
-#     DDIMScheduler, 
-#     PNDMScheduler, 
-#     DPMSolverMultistepScheduler, 
-#     EulerDiscreteScheduler, 
-#     EulerAncestralDiscreteScheduler,
-#     UniPCMultistepScheduler,
-#     HeunDiscreteScheduler,
-#     SASolverScheduler,
-#     DEISMultistepScheduler,
-#     LCMScheduler
-#     )
-
 scheduler_mapping = {
     "FlowMatchDiscreteScheduler": FlowMatchDiscreteScheduler,
     "SDE-DPMSolverMultistepScheduler": DPMSolverMultistepScheduler,
