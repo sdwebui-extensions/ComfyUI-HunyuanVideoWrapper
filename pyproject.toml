@@ -1,5 +1,5 @@
 [project]
-name = "ComfyUI-HunyuanVideoWrapper"
+name = "comfyui-hunyuanvideowrapper"
 description = "ComfyUI diffusers wrapper nodes for [a/HunyuanVideo](https://github.com/Tencent/HunyuanVideo)"
 version = "1.0.3"
 license = {file = "LICENSE"}
