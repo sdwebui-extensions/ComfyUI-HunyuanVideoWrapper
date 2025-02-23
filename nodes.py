@@ -15,19 +15,6 @@ from .hyvideo.diffusion.schedulers.scheduling_dpmsolver_multistep import DPMSolv
 from .hyvideo.diffusion.schedulers.scheduling_sasolver import SASolverScheduler
 from. hyvideo.diffusion.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
 
-# from diffusers.schedulers import ( 
-#     DDIMScheduler, 
-#     PNDMScheduler, 
-#     DPMSolverMultistepScheduler, 
-#     EulerDiscreteScheduler, 
-#     EulerAncestralDiscreteScheduler,
-#     UniPCMultistepScheduler,
-#     HeunDiscreteScheduler,
-#     SASolverScheduler,
-#     DEISMultistepScheduler,
-#     LCMScheduler
-#     )
-
 scheduler_mapping = {
     "FlowMatchDiscreteScheduler": FlowMatchDiscreteScheduler,
     "SDE-DPMSolverMultistepScheduler": DPMSolverMultistepScheduler,
@@ -572,6 +559,11 @@ class HyVideoVAELoader:
             vae_config = json.load(f)
         model_path = folder_paths.get_full_path("vae", model_name)
         vae_sd = load_torch_file(model_path, safe_load=True)
+        
+        if not "decoder.conv_norm_out.weight" in vae_sd:
+            raise ValueError("""
+Incompatible VAE model selected, the HunyuanVideoWrapper's VAE nodes require using the original VAE model: 'https://huggingface.co/Kijai/HunyuanVideo_comfy/blob/main/hunyuan_video_vae_bf16.safetensors'
+Alternatively you can also use the ComfyUI native VAELoader and the usual VAE nodes with the wrapper.""")
 
         vae = AutoencoderKLCausal3D.from_config(vae_config)
         vae.load_state_dict(vae_sd)
