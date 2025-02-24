@@ -40,7 +40,7 @@ EXAMPLE_DOC_STRING = """"""
 from ...modules.posemb_layers import get_nd_rotary_pos_embed
 from ....enhance_a_video.globals import enable_enhance, disable_enhance, set_enhance_weight
 
-def get_rotary_pos_embed(transformer, latent_video_length, height, width):
+def get_rotary_pos_embed(transformer, latent_video_length, height, width, k=0):
         target_ndim = 3
         ndim = 5 - 2
         rope_theta = 225
@@ -85,6 +85,8 @@ def get_rotary_pos_embed(transformer, latent_video_length, height, width):
             theta=rope_theta,
             use_real=True,
             theta_rescale_factor=1,
+            num_frames=latent_video_length,
+            k=k,
         )
         return freqs_cos, freqs_sin
 def retrieve_timesteps(
@@ -424,6 +426,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         feta_args: Optional[Dict] = None,
         leapfusion_img2vid: Optional[bool] = False,
         image_cond_latents: Optional[torch.Tensor] = None,
+        riflex_freq_index: Optional[int] = None,
         **kwargs,
     ):
         r"""
@@ -611,7 +614,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         else:
             # rotary embeddings
             freqs_cos, freqs_sin = get_rotary_pos_embed(
-                self.transformer, latent_video_length, height, width
+                self.transformer, latent_video_length, height, width, k=riflex_freq_index
             )
         if not self.transformer.upcast_rope:
             freqs_cos = freqs_cos.to(self.base_dtype).to(device)

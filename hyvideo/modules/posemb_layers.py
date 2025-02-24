@@ -113,6 +113,8 @@ def get_nd_rotary_pos_embed(
     use_real=False,
     theta_rescale_factor: Union[float, List[float]] = 1.0,
     interpolation_factor: Union[float, List[float]] = 1.0,
+    num_frames: int = 129,
+    k: int = 0,
 ):
     """
     This is a n-d version of precompute_freqs_cis, which is a RoPE for tokens with n-d structure.
@@ -163,6 +165,8 @@ def get_nd_rotary_pos_embed(
             use_real=use_real,
             theta_rescale_factor=theta_rescale_factor[i],
             interpolation_factor=interpolation_factor[i],
+            L_test=num_frames,
+            k=k,
         )  # 2 x [WHD, rope_dim_list[i]]
         embs.append(emb)
 
@@ -182,6 +186,8 @@ def get_1d_rotary_pos_embed(
     use_real: bool = False,
     theta_rescale_factor: float = 1.0,
     interpolation_factor: float = 1.0,
+    L_test: int = 100,
+    k: int = 0,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Precompute the frequency tensor for complex exponential (cis) with given dimensions.
@@ -215,6 +221,12 @@ def get_1d_rotary_pos_embed(
         theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
     )  # [D/2]
     # assert interpolation_factor == 1.0, f"interpolation_factor: {interpolation_factor}"
+
+    #RIFLEx https://github.com/thu-ml/RIFLEx
+    if k > 0:
+        freqs[k-1] = 0.9 * 2 * torch.pi / L_test
+
+
     freqs = torch.outer(pos * interpolation_factor, freqs)  # [S, D/2]
     if use_real:
         freqs_cos = freqs.cos().repeat_interleave(2, dim=1)  # [S, D]
