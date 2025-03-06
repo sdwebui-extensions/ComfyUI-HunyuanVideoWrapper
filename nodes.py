@@ -1520,7 +1520,7 @@ class HyVideoGetClosestBucketSize:
     def INPUT_TYPES(s):
         return {"required": {
                     "image": ("IMAGE",),
-                    "base_size": (["360", "540", "720", "960"], {"default": "540", "tooltip": "Resizes the input image to closest original training bucket size"}),
+                    "base_size": (["360", "540", "720"], {"default": "540", "tooltip": "Resizes the input image to closest original training bucket size"}),
                     },
                 }
 
@@ -1530,8 +1530,14 @@ class HyVideoGetClosestBucketSize:
     CATEGORY = "HunyuanVideoWrapper"
 
     def encode(self, image, base_size):
+        if base_size == "720p":
+            bucket_hw_base_size = 960
+        elif base_size == "540p":
+            bucket_hw_base_size = 720
+        elif base_size == "360p":
+            bucket_hw_base_size = 480
         B, H, W, C = image.shape
-        crop_size_list = self.generate_crop_size_list(int(base_size), 32)
+        crop_size_list = self.generate_crop_size_list(int(bucket_hw_base_size), 32)
         aspect_ratios = np.array([round(float(h)/float(w), 5) for h, w in crop_size_list])
         closest_size, closest_ratio = self.get_closest_ratio(H, W, aspect_ratios, crop_size_list)
         log.info(f"ImageResizeToBucket: Closest size = {closest_size}, closest ratio = {closest_ratio}")
