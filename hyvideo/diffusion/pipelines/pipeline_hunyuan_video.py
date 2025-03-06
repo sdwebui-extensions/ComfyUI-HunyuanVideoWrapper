@@ -911,8 +911,6 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                     else:
                         comfy_pbar.update(1)
 
-        if leapfusion_img2vid:
+        if leapfusion_img2vid or i2v_mask is not None:
             latents = latents[:, :, 1:, :, :]
-        if i2v_mask is not None:
-            latents = latents[:, :, 4:, :, :]
         return latents
