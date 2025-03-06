@@ -1160,6 +1160,7 @@ class HyVideoSampler:
                     {
                         "default": 'FlowMatchDiscreteScheduler'
                     }),
+                "riflex_freq_index": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Frequency index for RIFLEX, disabled when 0, default 4. Allows for new frames to be generated after 129 without looping"}),
             }
         }
 
@@ -1169,7 +1170,8 @@ class HyVideoSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
-                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, teacache_args=None, scheduler=None, image_cond_latents=None):
+                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, 
+                teacache_args=None, scheduler=None, image_cond_latents=None, riflex_freq_index=0):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1311,6 +1313,7 @@ class HyVideoSampler:
             feta_args=feta_args,
             leapfusion_img2vid = leapfusion_img2vid,
             image_cond_latents = image_cond_latents["samples"] * VAE_SCALING_FACTOR if image_cond_latents is not None else None,
+            riflex_freq_index = riflex_freq_index
         )
 
         print_memory(device)
