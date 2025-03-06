@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import CLIPTextModel, CLIPTokenizer, AutoTokenizer, AutoModel, AutoProcessor, CLIPImageProcessor #LlavaForConditionalGeneration
 from .modeling_llava import LlavaForConditionalGeneration
+from .processing_llava import LlavaProcessor
 from transformers.utils import ModelOutput
 
 from ..constants import TEXT_ENCODER_PATH, TOKENIZER_PATH
@@ -166,8 +167,11 @@ class TextEncoder(nn.Module):
         elif "llm" in text_encoder_type or "glm" in text_encoder_type or "vlm" in text_encoder_type:
             self.output_key = output_key or "last_hidden_state"
             if "glm" in text_encoder_type or "vlm" in text_encoder_type:
-                #self.processor = AutoProcessor.from_pretrained(text_encoder_path, device=device)
-                self.processor = CLIPImageProcessor.from_pretrained(text_encoder_path, use_fast=False)
+                self.processor_ip2v = LlavaProcessor.from_pretrained(text_encoder_path, device=device)
+                self.processor_ip2v.patch_size = None
+                self.processor_ip2v.vision_feature_select_strategy = None
+                
+                self.processor = CLIPImageProcessor.from_pretrained(text_encoder_path, device=device)
                 self.processor.patch_size = None
                 self.processor.vision_feature_select_strategy = None
         else:
@@ -259,7 +263,7 @@ class TextEncoder(nn.Module):
                     raw_images.append(image1.squeeze(0)*255)
                 if image2 is not None:
                     raw_images.append(image2.squeeze(0)*255)
-                text_tokens = self.processor(
+                text_tokens = self.processor_ip2v(
                     raw_images, 
                     text, 
                     **kwargs,

@@ -251,6 +251,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
         noise = randn_tensor(shape, generator=generator, device=device, dtype=self.base_dtype)
+    
         if freenoise:
             logger.info("Applying FreeNoise")
             # code and comments from AnimateDiff-Evolved by Kosinkadink (https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved)
@@ -285,28 +286,26 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 # apply shuffled indexes
                 #print("place_idx:", place_idx, "delta:", delta, "list_idx:", list_idx)
                 noise[:, :, place_idx:place_idx + delta, :, :] = noise[:, :, list_idx, :, :]
+
         i2v_mask = None
+        if official_i2v:
+            # Create mask
+            i2v_mask = torch.zeros(shape[0], 1, shape[2], shape[3], shape[4], device=device)
+            i2v_mask[:, :, 0, ...] = 1.0
+
         if image_cond_latents is not None:
             if image_cond_latents.shape[2] == 1:      
                 padding = torch.zeros(shape, device=device)
                 padding[:, :, 0:1, :, :] = image_cond_latents
                 image_cond_latents = padding
-        if official_i2v:
-            # Create mask
-            i2v_mask = torch.zeros(shape[0], 1, shape[2], shape[3], shape[4], device=device)
-            i2v_mask[:, :, 0, ...] = 1.0
-            t = torch.tensor([0.999]).to(device=device)
-            latents = noise * t + image_cond_latents * (1 - t)
-            latents = latents.to(dtype=self.base_dtype)
-        elif latents is None:
-            print("No latents provided, generating noise and using it as latents")
-            latents = noise        
-        elif denoise_strength < 1.0:
-            latents = latents.to(device)
+
+        if denoise_strength < 1.0:
+            if official_i2v:
+                latents = torch.cat((latents[:,:,0].unsqueeze(2), latents), dim=2)
             timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, denoise_strength, device)
             latent_timestep = timesteps[:1]
-            frames_needed = noise.shape[1]
-            current_frames = latents.shape[1]
+            frames_needed = noise.shape[2]
+            current_frames = latents.shape[2]
             
             if frames_needed > current_frames:
                 repeat_factor = frames_needed - current_frames
@@ -316,8 +315,13 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             elif frames_needed < current_frames:
                 latents = latents[:, :frames_needed, :, :, :]
             latents = latents * (1 - latent_timestep / 1000) + latent_timestep / 1000 * noise
+            print("latents shape:", latents.shape)
+        elif official_i2v:
+            t = torch.tensor([0.999]).to(device=device)
+            latents = noise * t + image_cond_latents * (1 - t)
+            latents = latents.to(dtype=self.base_dtype)
         else:
-            latents = latents.to(device)
+            latents = noise
 
         # Check existence to make it compatible with FlowMatchEulerDiscreteScheduler
         if hasattr(self.scheduler, "init_noise_sigma"):
