@@ -1536,6 +1536,8 @@ class HyVideoGetClosestBucketSize:
             bucket_hw_base_size = 720
         elif base_size == "360p":
             bucket_hw_base_size = 480
+        else:
+            raise NotImplementedError(f"Base size {base_size} not implemented")
         B, H, W, C = image.shape
         crop_size_list = self.generate_crop_size_list(int(bucket_hw_base_size), 32)
         aspect_ratios = np.array([round(float(h)/float(w), 5) for h, w in crop_size_list])
