@@ -1530,11 +1530,11 @@ class HyVideoGetClosestBucketSize:
     CATEGORY = "HunyuanVideoWrapper"
 
     def encode(self, image, base_size):
-        if base_size == "720p":
+        if base_size == "720":
             bucket_hw_base_size = 960
-        elif base_size == "540p":
+        elif base_size == "540":
             bucket_hw_base_size = 720
-        elif base_size == "360p":
+        elif base_size == "360":
             bucket_hw_base_size = 480
         else:
             raise NotImplementedError(f"Base size {base_size} not implemented")
