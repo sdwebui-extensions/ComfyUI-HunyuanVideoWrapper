@@ -158,16 +158,26 @@ def get_nd_rotary_pos_embed(
     # use 1/ndim of dimensions to encode grid_axis
     embs = []
     for i in range(len(rope_dim_list)):
-        emb = get_1d_rotary_pos_embed(
-            rope_dim_list[i],
-            grid[i].reshape(-1),
-            theta,
-            use_real=use_real,
-            theta_rescale_factor=theta_rescale_factor[i],
-            interpolation_factor=interpolation_factor[i],
-            L_test=num_frames,
-            k=k,
-        )  # 2 x [WHD, rope_dim_list[i]]
+        if i == 0:
+            emb = get_1d_rotary_pos_embed_riflex(
+                rope_dim_list[i],
+                grid[i].reshape(-1),
+                theta,
+                use_real=use_real,
+                theta_rescale_factor=theta_rescale_factor[i],
+                interpolation_factor=interpolation_factor[i],
+                L_test=num_frames,
+                k=k,
+            )  # 2 x [WHD, rope_dim_list[i]]
+        else:
+            emb = get_1d_rotary_pos_embed(
+                rope_dim_list[i],
+                grid[i].reshape(-1),
+                theta,
+                use_real=use_real,
+                theta_rescale_factor=theta_rescale_factor[i],
+                interpolation_factor=interpolation_factor[i],
+            )  
         embs.append(emb)
 
     if use_real:
@@ -222,8 +232,63 @@ def get_1d_rotary_pos_embed(
     )  # [D/2]
     # assert interpolation_factor == 1.0, f"interpolation_factor: {interpolation_factor}"
 
+    freqs = torch.outer(pos * interpolation_factor, freqs)  # [S, D/2]
+    if use_real:
+        freqs_cos = freqs.cos().repeat_interleave(2, dim=1)  # [S, D]
+        freqs_sin = freqs.sin().repeat_interleave(2, dim=1)  # [S, D]
+        return freqs_cos, freqs_sin
+    else:
+        freqs_cis = torch.polar(
+            torch.ones_like(freqs), freqs
+        )  # complex64     # [S, D/2]
+        return freqs_cis
+
+def get_1d_rotary_pos_embed_riflex(
+    dim: int,
+    pos: Union[torch.FloatTensor, int],
+    theta: float = 10000.0,
+    use_real: bool = False,
+    theta_rescale_factor: float = 1.0,
+    interpolation_factor: float = 1.0,
+    L_test: int = 66,
+    k: int = 0,
+    N_k: int=50
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    """
+    Precompute the frequency tensor for complex exponential (cis) with given dimensions.
+    (Note: `cis` means `cos + i * sin`, where i is the imaginary unit.)
+
+    This function calculates a frequency tensor with complex exponential using the given dimension 'dim'
+    and the end index 'end'. The 'theta' parameter scales the frequencies.
+    The returned tensor contains complex values in complex64 data type.
+
+    Args:
+        dim (int): Dimension of the frequency tensor.
+        pos (int or torch.FloatTensor): Position indices for the frequency tensor. [S] or scalar
+        theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
+        use_real (bool, optional): If True, return real part and imaginary part separately.
+                                   Otherwise, return complex numbers.
+        theta_rescale_factor (float, optional): Rescale factor for theta. Defaults to 1.0.
+
+    Returns:
+        freqs_cis: Precomputed frequency tensor with complex exponential. [S, D/2]
+        freqs_cos, freqs_sin: Precomputed frequency tensor with real and imaginary parts separately. [S, D]
+    """
+    if isinstance(pos, int):
+        pos = torch.arange(pos).float()
+
+    # proposed by reddit user bloc97, to rescale rotary embeddings to longer sequence length without fine-tuning
+    # has some connection to NTK literature
+    if theta_rescale_factor != 1.0:
+        theta *= theta_rescale_factor ** (dim / (dim - 2))
+
+    freqs = 1.0 / (
+        theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
+    )  # [D/2]
+    # assert interpolation_factor == 1.0, f"interpolation_factor: {interpolation_factor}"
+
     #RIFLEx https://github.com/thu-ml/RIFLEx
-    if k > 0:
+    if k > 0 and L_test > N_k:
         freqs[k-1] = 0.9 * 2 * torch.pi / L_test
 
 
