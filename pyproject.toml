@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-hunyuanvideowrapper"
 description = "ComfyUI diffusers wrapper nodes for [a/HunyuanVideo](https://github.com/Tencent/HunyuanVideo)"
-version = "1.0.3"
+version = "1.0.4"
 license = {file = "LICENSE"}
 dependencies = ["accelerate >= 1.2.1", "diffusers >= 0.31.0", "transformers >= 4.47.0", "jax >= 0.4.28", "timm >= 0.6.13"]
 
