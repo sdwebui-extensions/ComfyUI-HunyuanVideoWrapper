@@ -688,6 +688,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         self.enable_teacache = False
         self.cnt = 0
         self.num_steps = 0
+        self.teacache_skipped_steps = 0
         self.rel_l1_thresh = 0.15
         self.accumulated_rel_l1_distance = 0
         self.previous_modulated_input = None
@@ -1026,6 +1027,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                 self.cnt = 0
 
             if not should_calc and self.previous_residual is not None:
+                self.teacache_skipped_steps += 1
                 # Verify tensor dimensions match before adding
                 if img.shape == self.previous_residual.shape:
                     img = img + self.previous_residual

@@ -5,7 +5,7 @@ import gc
 from .utils import log, print_memory
 from diffusers.video_processor import VideoProcessor
 from typing import List, Dict, Any, Tuple
-
+import numpy as np
 from .hyvideo.constants import PROMPT_TEMPLATE
 from .hyvideo.text_encoder import TextEncoder
 from .hyvideo.utils.data_utils import align_to
@@ -35,6 +35,7 @@ folder_paths.add_model_folder_path("hyvid_embeds", os.path.join(folder_paths.get
 
 import comfy.model_management as mm
 from comfy.utils import load_torch_file, save_torch_file
+from comfy.clip_vision import clip_preprocess
 import comfy.model_base
 import comfy.latent_formats
 
@@ -315,6 +316,7 @@ class HyVideoModelLoader:
         sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
 
         in_channels = sd["img_in.proj.weight"].shape[1]
+        guidance_embed = sd.get("guidance_in.mlp.0.weight", False) is not False
 
         out_channels = 16
         factor_kwargs = {"device": transformer_load_device, "dtype": base_dtype}
@@ -325,7 +327,7 @@ class HyVideoModelLoader:
             "hidden_size": 3072,
             "heads_num": 24,
             "mlp_width_ratio": 4,
-            "guidance_embed": True,
+            "guidance_embed": guidance_embed,
         }
         with init_empty_weights():
             transformer = HYVideoDiffusionTransformer(
@@ -559,6 +561,11 @@ class HyVideoVAELoader:
             vae_config = json.load(f)
         model_path = folder_paths.get_full_path("vae", model_name)
         vae_sd = load_torch_file(model_path, safe_load=True)
+        
+        if not "decoder.conv_norm_out.weight" in vae_sd:
+            raise ValueError("""
+Incompatible VAE model selected, the HunyuanVideoWrapper's VAE nodes require using the original VAE model: 'https://huggingface.co/Kijai/HunyuanVideo_comfy/blob/main/hunyuan_video_vae_bf16.safetensors'
+Alternatively you can also use the ComfyUI native VAELoader and the usual VAE nodes with the wrapper.""")
 
         vae = AutoencoderKLCausal3D.from_config(vae_config)
         vae.load_state_dict(vae_sd)
@@ -784,7 +791,7 @@ class HyVideoTextEncode:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None):
+    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image=None, image1=None, image2=None, clip_text_override=None):
         if clip_text_override is not None and len(clip_text_override) == 0:
             clip_text_override = None
         device = mm.text_encoder_device()
@@ -810,6 +817,10 @@ class HyVideoTextEncode:
                 prompt_template_dict = PROMPT_TEMPLATE["dit-llm-encode-video"]
             elif prompt_template == "image":
                 prompt_template_dict = PROMPT_TEMPLATE["dit-llm-encode"]
+            elif prompt_template == "I2V_video":
+                prompt_template_dict = PROMPT_TEMPLATE["dit-llm-encode-video-i2v"]
+            elif prompt_template == "I2V_image":
+                prompt_template_dict = PROMPT_TEMPLATE["dit-llm-encode-i2v"]
             else:
                 raise ValueError(f"Invalid prompt_template: {prompt_template_dict}")
             assert (
@@ -827,16 +838,32 @@ class HyVideoTextEncode:
             batch_size = 1
             num_videos_per_prompt = 1
 
-            text_inputs = text_encoder.text2tokens(prompt, 
-                                                   prompt_template=prompt_template_dict,
-                                                   image1=image1,
-                                                   image2=image2,
-                                                   clip_text_override=clip_text_override)
-            prompt_outputs = text_encoder.encode(text_inputs, 
-                                                 prompt_template=prompt_template_dict, 
-                                                 image_token_selection_expr=image_token_selection_expr, 
-                                                 device=device
-                                                 )
+            if image is not None:
+                #pixel_values = clip_preprocess(image.to(device), size=336, crop=True).float() * 255
+                #print(pixel_values.min(), pixel_values.max())
+
+                text_inputs = text_encoder.text2tokens(prompt, 
+                                                    prompt_template=prompt_template_dict)
+                prompt_outputs = text_encoder.encode(text_inputs, 
+                                                    prompt_template=prompt_template_dict, 
+                                                    image_token_selection_expr=image_token_selection_expr,
+                                                    semantic_images = [image.squeeze(0) * 255] if text_encoder.text_encoder_type == "vlm" else None,
+                                                    device=device,
+                                                    data_type=prompt_template
+                                                    )
+            else:
+                text_inputs = text_encoder.text2tokens(prompt, 
+                                                    prompt_template=prompt_template_dict,
+                                                    image1=image1,
+                                                    image2=image2,
+                                                    clip_text_override=clip_text_override)
+                prompt_outputs = text_encoder.encode(text_inputs, 
+                                                    prompt_template=prompt_template_dict, 
+                                                    image_token_selection_expr=image_token_selection_expr,
+                                                    semantic_images = None,
+                                                    device=device
+                                                    )
+                
             prompt_embeds = prompt_outputs.hidden_state
 
             attention_mask = prompt_outputs.attention_mask
@@ -975,6 +1002,27 @@ class HyVideoTextImageEncode(HyVideoTextEncode):
                 "image1": ("IMAGE", {"default": None}),
                 "image2": ("IMAGE", {"default": None}),
                 "clip_text_override": ("STRING", {"default": "", "multiline": True} ),
+                "hyvid_cfg": ("HYVID_CFG", ),
+            }
+        }
+
+    RETURN_TYPES = ("HYVIDEMBEDS", )
+    RETURN_NAMES = ("hyvid_embeds",)
+    FUNCTION = "process"
+    CATEGORY = "HunyuanVideoWrapper"
+
+class HyVideoI2VEncode(HyVideoTextEncode):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "text_encoders": ("HYVIDTEXTENCODER",),
+            "prompt": ("STRING", {"default": "", "multiline": True} ),
+            },
+            "optional": {
+                "force_offload": ("BOOLEAN", {"default": True}),
+                "prompt_template": (["I2V_video", "I2V_image", "disabled"], {"default": "I2V_video", "tooltip": "Use the default prompt templates for the llm text encoder"}),
+                "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
+                "image": ("IMAGE", {"default": None}),
                 "hyvid_cfg": ("HYVID_CFG", ),
             }
         }
@@ -1150,6 +1198,7 @@ class HyVideoSampler:
                     {
                         "default": 'FlowMatchDiscreteScheduler'
                     }),
+                "riflex_freq_index": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Frequency index for RIFLEX, disabled when 0, default 4. Allows for new frames to be generated after 129 without looping"}),
             }
         }
 
@@ -1159,7 +1208,8 @@ class HyVideoSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
-                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, teacache_args=None, scheduler=None, image_cond_latents=None):
+                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, 
+                teacache_args=None, scheduler=None, image_cond_latents=None, riflex_freq_index=0):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1301,6 +1351,7 @@ class HyVideoSampler:
             feta_args=feta_args,
             leapfusion_img2vid = leapfusion_img2vid,
             image_cond_latents = image_cond_latents["samples"] * VAE_SCALING_FACTOR if image_cond_latents is not None else None,
+            riflex_freq_index = riflex_freq_index
         )
 
         print_memory(device)
@@ -1308,6 +1359,9 @@ class HyVideoSampler:
             torch.cuda.reset_peak_memory_stats(device)
         except:
             pass
+
+        if teacache_args is not None:
+            log.info(f"TeaCache skipped {transformer.teacache_skipped_steps} steps")
 
         if force_offload:
             if model["manual_offloading"]:
@@ -1460,6 +1514,47 @@ class HyVideoEncode:
 
 
         return ({"samples": latents},)
+    
+class HyVideoGetClosestBucketSize:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "image": ("IMAGE",),
+                    "base_size": (["360", "540", "720", "960"], {"default": "540", "tooltip": "Resizes the input image to closest original training bucket size"}),
+                    },
+                }
+
+    RETURN_TYPES = ("INT","INT",)
+    RETURN_NAMES = ("width", "height",)
+    FUNCTION = "encode"
+    CATEGORY = "HunyuanVideoWrapper"
+
+    def encode(self, image, base_size):
+        B, H, W, C = image.shape
+        crop_size_list = self.generate_crop_size_list(int(base_size), 32)
+        aspect_ratios = np.array([round(float(h)/float(w), 5) for h, w in crop_size_list])
+        closest_size, closest_ratio = self.get_closest_ratio(H, W, aspect_ratios, crop_size_list)
+        log.info(f"ImageResizeToBucket: Closest size = {closest_size}, closest ratio = {closest_ratio}")
+        return (closest_size[1], closest_size[0],)
+    
+    def generate_crop_size_list(self, base_size=256, patch_size=16, max_ratio=4.0):
+        num_patches =  round((base_size / patch_size) ** 2)
+        assert max_ratio >= 1.
+        crop_size_list = []
+        wp, hp = num_patches, 1
+        while wp > 0:
+            if max(wp, hp) / min(wp, hp) <= max_ratio:
+                crop_size_list.append((wp * patch_size, hp * patch_size))
+            if (hp + 1) * wp <= num_patches:
+                hp += 1
+            else:
+                wp -= 1
+        return crop_size_list
+    def get_closest_ratio(self, height: float, width: float, ratios: list, buckets: list):
+        aspect_ratio = float(height)/float(width)
+        closest_ratio_id = np.abs(ratios - aspect_ratio).argmin()
+        closest_ratio = min(ratios, key=lambda ratio: abs(float(ratio) - aspect_ratio))
+        return buckets[closest_ratio_id], float(closest_ratio)
 
 class HyVideoLatentPreview:
     @classmethod
@@ -1558,6 +1653,8 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoContextOptions": HyVideoContextOptions,
     "HyVideoEnhanceAVideo": HyVideoEnhanceAVideo,
     "HyVideoTeaCache": HyVideoTeaCache,
+    "HyVideoGetClosestBucketSize": HyVideoGetClosestBucketSize,
+    "HyVideoI2VEncode": HyVideoI2VEncode
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1581,4 +1678,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoContextOptions": "HunyuanVideo Context Options",
     "HyVideoEnhanceAVideo": "HunyuanVideo Enhance A Video",
     "HyVideoTeaCache": "HunyuanVideo TeaCache",
+    "HyVideoGetClosestBucketSize": "HunyuanVideo Get Closest Bucket Size",
+    "HyVideoI2VEncode": "HyVideo I2V Encode"
     }

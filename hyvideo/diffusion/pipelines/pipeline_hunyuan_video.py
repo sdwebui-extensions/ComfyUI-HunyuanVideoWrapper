@@ -40,7 +40,7 @@ EXAMPLE_DOC_STRING = """"""
 from ...modules.posemb_layers import get_nd_rotary_pos_embed
 from ....enhance_a_video.globals import enable_enhance, disable_enhance, set_enhance_weight
 
-def get_rotary_pos_embed(transformer, latent_video_length, height, width):
+def get_rotary_pos_embed(transformer, latent_video_length, height, width, k=0):
         target_ndim = 3
         ndim = 5 - 2
         rope_theta = 225
@@ -85,6 +85,8 @@ def get_rotary_pos_embed(transformer, latent_video_length, height, width):
             theta=rope_theta,
             use_real=True,
             theta_rescale_factor=1,
+            num_frames=latent_video_length,
+            k=k,
         )
         return freqs_cos, freqs_sin
 def retrieve_timesteps(
@@ -233,8 +235,12 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         freenoise=False, 
         context_size=None, 
         context_overlap=None,
-        leapfusion_img2vid=False
+        leapfusion_img2vid=False,
+        i2v_mask=None,
+        image_cond_latents=None,
     ):
+        #if i2v_mask is not None:
+        #    num_channels_latents = (num_channels_latents - 1) // 2
         shape = (
             batch_size,
             num_channels_latents,
@@ -283,11 +289,16 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 #print("place_idx:", place_idx, "delta:", delta, "list_idx:", list_idx)
                 noise[:, :, place_idx:place_idx + delta, :, :] = noise[:, :, list_idx, :, :]
 
-        if latents is None:
-            latents = noise
-        elif leapfusion_img2vid:
-            noise[:, :, [0,], :, :] = latents[:, :, [0,], :, :].to(noise)
-            latents = noise.to(device)
+        if i2v_mask is not None:
+            print("i2v_mask shape:", i2v_mask.shape)
+            if image_cond_latents.shape[2] == 1:
+                image_cond_latents = image_cond_latents.repeat(1, 1, video_length, 1, 1)
+            t = torch.tensor([0.999]).to(device=device)
+            latents = noise * t + image_cond_latents * (1 - t)
+            latents = latents.to(dtype=self.base_dtype)
+        elif latents is None:
+            print("No latents provided, generating noise and using it as latents")
+            latents = noise        
         elif denoise_strength < 1.0:
             latents = latents.to(device)
             timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, denoise_strength, device)
@@ -424,6 +435,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         feta_args: Optional[Dict] = None,
         leapfusion_img2vid: Optional[bool] = False,
         image_cond_latents: Optional[torch.Tensor] = None,
+        riflex_freq_index: Optional[int] = None,
         **kwargs,
     ):
         r"""
@@ -574,16 +586,25 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         else:
             disable_enhance()
 
+        i2v_mask = None
+        image_latents = None
         if image_cond_latents is not None:
-            padding_shape = (
-                batch_size,
-                16,
-                latent_video_length - 1,
-                int(height) // 8,
-                int(width) // 8,
+            # Expand to video length and zero-pad remaining frames
+            image_latents = torch.zeros(
+                (batch_size, 16, latent_video_length, height//8, width//8),
+                device=device, 
+                dtype=self.base_dtype
             )
-            latent_padding = torch.zeros(padding_shape, device=device, dtype=self.base_dtype)
-            image_latents = torch.cat([image_cond_latents, latent_padding], dim=2)
+            image_latents[:, :, 0:1, ...] = image_cond_latents
+
+            # Create mask
+            i2v_mask = torch.zeros(
+                batch_size, 1, latent_video_length, height//8, width//8,
+                device=device
+            )
+            i2v_mask[:, :, 0, ...] = 1.0
+            print("i2v_mask shape:", i2v_mask.shape)
+
             print("image_cond_latents shape:", image_cond_latents.shape)
             print("image_latents shape:", image_latents.shape)
         
@@ -611,7 +632,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         else:
             # rotary embeddings
             freqs_cos, freqs_sin = get_rotary_pos_embed(
-                self.transformer, latent_video_length, height, width
+                self.transformer, latent_video_length, height, width, k=riflex_freq_index
             )
         if not self.transformer.upcast_rope:
             freqs_cos = freqs_cos.to(self.base_dtype).to(device)
@@ -641,7 +662,9 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             freenoise=freenoise,
             context_size=context_frames,
             context_overlap=context_overlap,
-            leapfusion_img2vid=leapfusion_img2vid
+            leapfusion_img2vid=leapfusion_img2vid,
+            i2v_mask=i2v_mask,
+            image_cond_latents=image_latents,
         )
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
@@ -721,18 +744,24 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                     latent_image_input = (
                         torch.cat([image_latents] * 2) if cfg_enabled else image_latents
                     )
+                    if i2v_mask is not None:
+                        i2v_mask = torch.cat([i2v_mask] * 2) if cfg_enabled else i2v_mask
+                        latent_image_input = torch.cat([latent_image_input, i2v_mask], dim=1)
                     latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=1)
 
-                if cfg_enabled:
-                    guidance_expand = (
-                        torch.tensor([embedded_guidance_scale] * latents.shape[0] * 2, dtype=self.base_dtype, device=device)
-                        * 1000.0
-                    )
+                if self.transformer.guidance_embed:
+                    if cfg_enabled:
+                        guidance_expand = (
+                            torch.tensor([embedded_guidance_scale] * latents.shape[0] * 2, dtype=self.base_dtype, device=device)
+                            * 1000.0
+                        )
+                    else:
+                        guidance_expand = (
+                            torch.tensor([embedded_guidance_scale] * latents.shape[0], dtype=self.base_dtype, device=device)
+                            * 1000.0
+                        )
                 else:
-                    guidance_expand = (
-                        torch.tensor([embedded_guidance_scale] * latents.shape[0], dtype=self.base_dtype, device=device)
-                        * 1000.0
-                    )
+                    guidance_expand = None
 
                 if use_context_schedule:
                     counter = torch.zeros_like(latent_model_input)
@@ -745,7 +774,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                         #print("partial_latent_model_input", partial_latent_model_input.shape)
                         with torch.autocast(
                         device_type="cuda", dtype=self.base_dtype, enabled=True):
-                            noise_pred[:, :, c, :, :] += self.transformer(
+                            noise_pred_context = self.transformer(
                                 partial_latent_model_input, 
                                 t_expand,
                                 text_states=input_prompt_embeds,
@@ -758,8 +787,19 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 stg_mode=stg_mode,
                                 return_dict=True,
                             )["x"]
-
-                            counter[:, :, c, :, :] += 1
+                            window_mask = torch.ones_like(noise_pred_context)
+                            # Apply left-side blending for all except first chunk
+                            if min(c) > 0: 
+                                ramp_up = torch.linspace(0, 1, context_overlap, device=noise_pred_context.device)
+                                ramp_up = ramp_up.view(1, 1, -1, 1, 1)
+                                window_mask[:, :, :context_overlap] = ramp_up
+                            # Apply right-side blending for all except last chunk
+                            if max(c) < latent_video_length - 1:
+                                ramp_down = torch.linspace(1, 0, context_overlap, device=noise_pred_context.device)
+                                ramp_down = ramp_down.view(1, 1, -1, 1, 1)
+                                window_mask[:, :, -context_overlap:] = ramp_down
+                            noise_pred[:, :, c, :, :] += noise_pred_context * window_mask
+                            counter[:, :, c, :, :] += window_mask
                             noise_pred = noise_pred.float()
                     noise_pred /= counter
                 else:
@@ -873,4 +913,6 @@ class HunyuanVideoPipeline(DiffusionPipeline):
 
         if leapfusion_img2vid:
             latents = latents[:, :, 1:, :, :]
+        if i2v_mask is not None:
+            latents = latents[:, :, 4:, :, :]
         return latents
