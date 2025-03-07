@@ -316,6 +316,12 @@ class HyVideoModelLoader:
         sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
 
         in_channels = sd["img_in.proj.weight"].shape[1]
+        print("In channels: ", in_channels)
+        if in_channels == 16:
+            i2v_condition_type = "token_replace"
+        elif in_channels == 33:
+            i2v_condition_type = "latent_concat"
+
         guidance_embed = sd.get("guidance_in.mlp.0.weight", False) is not False
 
         out_channels = 16
@@ -328,6 +334,7 @@ class HyVideoModelLoader:
             "heads_num": 24,
             "mlp_width_ratio": 4,
             "guidance_embed": guidance_embed,
+            "i2v_condition_type": i2v_condition_type,
         }
         with init_empty_weights():
             transformer = HYVideoDiffusionTransformer(
@@ -350,7 +357,7 @@ class HyVideoModelLoader:
         )        
         
         scheduler_config = {
-            "flow_shift": 9.0,
+            "flow_shift": 7.0,
             "reverse": True,
             "solver": "euler",
             "use_flow_sigmas": True, 
@@ -791,7 +798,8 @@ class HyVideoTextEncode:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image=None, image1=None, image2=None, clip_text_override=None):
+    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", 
+                hyvid_cfg=None, image=None, image1=None, image2=None, clip_text_override=None, image_embed_interleave=2):
         if clip_text_override is not None and len(clip_text_override) == 0:
             clip_text_override = None
         device = mm.text_encoder_device()
@@ -834,7 +842,7 @@ class HyVideoTextEncode:
         else:
             prompt_template_dict = None
 
-        def encode_prompt(self, prompt, negative_prompt, text_encoder, image_token_selection_expr="::4", image1=None, image2=None, clip_text_override=None):
+        def encode_prompt(self, prompt, negative_prompt, text_encoder, image_token_selection_expr="::4", semantic_images=None, image1=None, image2=None, clip_text_override=None, image_embed_interleave=2):
             batch_size = 1
             num_videos_per_prompt = 1
 
@@ -847,9 +855,10 @@ class HyVideoTextEncode:
                 prompt_outputs = text_encoder.encode(text_inputs, 
                                                     prompt_template=prompt_template_dict, 
                                                     image_token_selection_expr=image_token_selection_expr,
-                                                    semantic_images = [image.squeeze(0) * 255] if text_encoder.text_encoder_type == "vlm" else None,
+                                                    semantic_images = [semantic_images.squeeze(0) * 255] if text_encoder.text_encoder_type == "vlm" else None,
+                                                    image_embed_interleave=image_embed_interleave,
                                                     device=device,
-                                                    data_type=prompt_template
+                                                    data_type=prompt_template,
                                                     )
             else:
                 text_inputs = text_encoder.text2tokens(prompt, 
@@ -935,7 +944,9 @@ class HyVideoTextEncode:
                                                                                                             text_encoder_1, 
                                                                                                             image_token_selection_expr=image_token_selection_expr,
                                                                                                             image1=image1,
-                                                                                                            image2=image2)
+                                                                                                            image2=image2,
+                                                                                                            semantic_images=image,
+                                                                                                            image_embed_interleave=image_embed_interleave,)
         if force_offload:
             text_encoder_1.to(offload_device)
             mm.soft_empty_cache()
@@ -1024,6 +1035,7 @@ class HyVideoI2VEncode(HyVideoTextEncode):
                 "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
                 "image": ("IMAGE", {"default": None}),
                 "hyvid_cfg": ("HYVID_CFG", ),
+                "image_embed_interleave": ("INT", {"default": 2}),
             }
         }
 
@@ -1199,6 +1211,7 @@ class HyVideoSampler:
                         "default": 'FlowMatchDiscreteScheduler'
                     }),
                 "riflex_freq_index": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Frequency index for RIFLEX, disabled when 0, default 4. Allows for new frames to be generated after 129 without looping"}),
+                "i2v_mode": (["stability", "dynamic"], {"default": "disabled", "tooltip": "I2V mode for image2video process"}),
             }
         }
 
@@ -1209,7 +1222,7 @@ class HyVideoSampler:
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
                 samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, 
-                teacache_args=None, scheduler=None, image_cond_latents=None, riflex_freq_index=0):
+                teacache_args=None, scheduler=None, image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability"):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1238,6 +1251,10 @@ class HyVideoSampler:
         if embedded_guidance_scale == 0.0:
             embedded_guidance_scale = None
 
+        i2v_stability = False
+        if i2v_mode == "stability":
+            i2v_stability = True
+     
         generator = torch.Generator(device=torch.device("cpu")).manual_seed(seed)
 
         if width <= 0 or height <= 0 or num_frames <= 0:
@@ -1351,7 +1368,8 @@ class HyVideoSampler:
             feta_args=feta_args,
             leapfusion_img2vid = leapfusion_img2vid,
             image_cond_latents = image_cond_latents["samples"] * VAE_SCALING_FACTOR if image_cond_latents is not None else None,
-            riflex_freq_index = riflex_freq_index
+            riflex_freq_index = riflex_freq_index,
+            i2v_stability = i2v_stability,
         )
 
         print_memory(device)

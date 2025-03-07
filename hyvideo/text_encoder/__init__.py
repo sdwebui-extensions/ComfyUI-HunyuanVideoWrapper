@@ -455,6 +455,8 @@ class TextEncoder(nn.Module):
                 image_last_hidden_state = torch.stack(image_last_hidden_state)
                 image_attention_mask = torch.stack(image_attention_mask)
 
+                print("image_embed_interleave", image_embed_interleave)
+
                 if semantic_images is not None and 0 < image_embed_interleave < 6:
                     image_last_hidden_state = image_last_hidden_state[:, ::image_embed_interleave, :]
                     image_attention_mask = image_attention_mask[:, ::image_embed_interleave]
@@ -477,6 +479,7 @@ class TextEncoder(nn.Module):
         do_sample=False,
         hidden_state_skip_layer=None,
         return_texts=False,
+        image_embed_interleave=2,
     ):
         batch_encoding = self.text2tokens(text)
         return self.encode(
@@ -486,6 +489,7 @@ class TextEncoder(nn.Module):
             do_sample=do_sample,
             hidden_state_skip_layer=hidden_state_skip_layer,
             return_texts=return_texts,
+            image_embed_interleave=image_embed_interleave
         )
 
 xtuner_config={
