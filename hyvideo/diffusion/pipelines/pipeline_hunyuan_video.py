@@ -891,7 +891,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                             )
 
                 # compute the previous noisy sample x_t -> x_t-1
-                if i2v_condition_type == "token_replace":
+                if image_cond_latents is not None and i2v_condition_type == "token_replace":
                     latents = self.scheduler.step(
                         noise_pred[:, :, 1:, :, :], t, latents[:, :, 1:, :, :], **extra_step_kwargs, return_dict=False
                     )[0]
