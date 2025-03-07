@@ -319,7 +319,7 @@ class HyVideoModelLoader:
         print("In channels: ", in_channels)
         if in_channels == 16:
             i2v_condition_type = "token_replace"
-        elif in_channels == 33:
+        elif in_channels == 33 or in_channels == 32:
             i2v_condition_type = "latent_concat"
 
         guidance_embed = sd.get("guidance_in.mlp.0.weight", False) is not False

@@ -317,7 +317,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 latents = latents[:, :frames_needed, :, :, :]
             latents = latents * (1 - latent_timestep / 1000) + latent_timestep / 1000 * noise
             print("latents shape:", latents.shape)
-        elif i2v_stability:
+        elif image_cond_latents is not None and i2v_stability:
             if image_cond_latents.shape[2] == 1:
                 img_latents = image_cond_latents.repeat(1, 1, video_length, 1, 1)
             t = torch.tensor([0.999]).to(device=device)
