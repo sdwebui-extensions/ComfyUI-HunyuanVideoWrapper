@@ -1217,7 +1217,7 @@ class HyVideoSampler:
                         "default": 'FlowMatchDiscreteScheduler'
                     }),
                 "riflex_freq_index": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Frequency index for RIFLEX, disabled when 0, default 4. Allows for new frames to be generated after 129 without looping"}),
-                "i2v_mode": (["stability", "dynamic"], {"default": "disabled", "tooltip": "I2V mode for image2video process"}),
+                "i2v_mode": (["stability", "dynamic"], {"default": "dynamic", "tooltip": "I2V mode for image2video process"}),
             }
         }
 
