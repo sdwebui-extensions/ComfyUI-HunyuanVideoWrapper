@@ -320,6 +320,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         elif image_cond_latents is not None and i2v_stability:
             if image_cond_latents.shape[2] == 1:
                 img_latents = image_cond_latents.repeat(1, 1, video_length, 1, 1)
+            else:
+                img_latents = image_cond_latents
             t = torch.tensor([0.999]).to(device=device)
             latents = noise * t + img_latents * (1 - t)
             latents = latents.to(dtype=self.base_dtype)
@@ -728,8 +730,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
 
                 t_expand = t.repeat(latent_model_input.shape[0])
 
-                if leapfusion_img2vid:
-                    latent_model_input[:, :, [0,], :, :] = original_latents[:, :, [0,], :, :].to(latent_model_input)
+                #if leapfusion_img2vid:
+                #    latent_model_input[:, :, [0,], :, :] = original_latents[:, :, [0,], :, :].to(latent_model_input)
 
                 if image_cond_latents is not None and not use_context_schedule:
                     if i2v_condition_type == "latent_concat":
@@ -737,7 +739,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                         i2v_mask = torch.cat([i2v_mask] * 2) if cfg_enabled else i2v_mask
                         latent_image_input = torch.cat([latent_image_input, i2v_mask], dim=1)
                         latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=1)
-                    elif i2v_condition_type == "token_replace":
+                    elif i2v_condition_type == "token_replace" or leapfusion_img2vid:
                         latent_image_input = (torch.cat([original_image_latents] * 2) if cfg_enabled else original_image_latents)
                         latent_model_input = torch.cat([latent_image_input, latent_model_input[:, :, 1:, :, :]], dim=2)
                     else:

@@ -201,7 +201,6 @@ class MMDoubleStreamBlock(nn.Module):
         first_frame_token_num: int = None,
         condition_type: str = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        
         if condition_type == "token_replace":
             img_mod1, token_replace_img_mod1 = self.img_mod(vec, condition_type=condition_type, \
                                                             token_replace_vec=token_replace_vec)

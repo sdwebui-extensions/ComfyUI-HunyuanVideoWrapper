@@ -1489,6 +1489,7 @@ class HyVideoEncode:
                     "optional": {
                         "noise_aug_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Strength of noise augmentation, helpful for leapfusion I2V where some noise can add motion and give sharper results"}),
                         "latent_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Additional latent multiplier, helpful for leapfusion I2V where lower values allow for more motion"}),
+                        "latent_dist": (["sample", "mode"], {"default": "sample", "tooltip": "Sampling mode for the VAE, sample uses the latent distribution, mode uses the mode of the latent distribution"}),
                     }
                 }
 
@@ -1497,7 +1498,8 @@ class HyVideoEncode:
     FUNCTION = "encode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, spatial_tile_sample_min_size, noise_aug_strength=0.0, latent_strength=1.0):
+    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, 
+               spatial_tile_sample_min_size, noise_aug_strength=0.0, latent_strength=1.0, latent_dist="sample"):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
@@ -1523,7 +1525,10 @@ class HyVideoEncode:
         
         if enable_vae_tiling:
             vae.enable_tiling()
-        latents = vae.encode(image).latent_dist.sample(generator)
+        if latent_dist == "sample":
+            latents = vae.encode(image).latent_dist.sample(generator)
+        elif latent_dist == "mode":
+            latents = vae.encode(image).latent_dist.mode()
         if latent_strength != 1.0:
             latents *= latent_strength
         #latents = latents * vae.config.scaling_factor
