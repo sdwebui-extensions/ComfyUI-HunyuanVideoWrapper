@@ -9,7 +9,17 @@ except ImportError:
     flash_attn_varlen_func = None
 
 try:
-    from sageattention import sageattn_varlen, sageattn
+    major, minor = torch.cuda.get_device_capability(0)
+    if f"{major}.{minor}" == "8.0":
+        from sageattention_sm80 import sageattn, sageattn_varlen
+    elif f"{major}.{minor}" == "8.6":
+        from sageattention_sm86 import sageattn, sageattn_varlen
+    elif f"{major}.{minor}" == "8.9":
+        from sageattention_sm89 import sageattn, sageattn_varlen
+    elif major>=9:
+        from sageattention_sm90 import sageattn, sageattn_varlen
+    else:
+        from sageattention import sageattn_varlen, sageattn
     @torch.compiler.disable()
     def sageattn_varlen_func(
             q,
