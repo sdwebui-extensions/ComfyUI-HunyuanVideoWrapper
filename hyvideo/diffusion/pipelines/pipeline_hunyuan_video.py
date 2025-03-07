@@ -332,7 +332,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         if hasattr(self.scheduler, "init_noise_sigma"):
             # scale the initial noise by the standard deviation required by the scheduler
             latents = latents * self.scheduler.init_noise_sigma
-        return latents, timesteps, i2v_mask, image_cond_latents
+        return latents.to(device), timesteps, i2v_mask, image_cond_latents
 
     # Copied from diffusers.pipelines.latent_consistency_models.pipeline_latent_consistency_text2img.LatentConsistencyModelPipeline.get_guidance_scale_embedding
     def get_guidance_scale_embedding(
