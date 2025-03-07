@@ -277,7 +277,6 @@ class HyVideoModelLoader:
                     "sdpa",
                     "flash_attn_varlen",
                     "sageattn_varlen",
-                    "sageattn",
                     "comfy",
                     ], {"default": "flash_attn"}),
                 "compile_args": ("COMPILEARGS", ),
