@@ -759,6 +759,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         self.previous_residual = None
         self.last_dimensions = None
         self.last_frame_count = None
+        self.teacache_device = None
 
     # thanks @2kpr for the initial block swap code!
     def block_swap(self, double_blocks_to_swap, single_blocks_to_swap, offload_txt_in=False, offload_img_in=False):
@@ -1108,7 +1109,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                 self.teacache_skipped_steps += 1
                 # Verify tensor dimensions match before adding
                 if img.shape == self.previous_residual.shape:
-                    img = img + self.previous_residual
+                    img = img + self.previous_residual.to(img.device)
                 else:
                     should_calc = True # Force recalculation if dimensions don't match
 
@@ -1121,7 +1122,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                 x = _process_single_blocks(x, vec, txt.shape[1], block_args, stg_mode, stg_block_idx)
 
                 img = x[:, :img_seq_len, ...]
-                self.previous_residual = img - ori_img
+                self.previous_residual = (img - ori_img).to(self.teacache_device)
         else:
             # Pass through DiT blocks
             img, txt = _process_double_blocks(img, txt, vec, block_args)

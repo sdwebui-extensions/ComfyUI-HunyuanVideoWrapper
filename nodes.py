@@ -219,6 +219,8 @@ class HyVideoTeaCache:
             "required": {
                 "rel_l1_thresh": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01,
                                             "tooltip": "Higher values will make TeaCache more aggressive, faster, but may cause artifacts"}),
+                "cache_device": (["main_device", "offload_device"], {"default": "offload_device", "tooltip": "Device to cache to"}),
+
             },
         }
     RETURN_TYPES = ("TEACACHEARGS",)
@@ -227,9 +229,14 @@ class HyVideoTeaCache:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "TeaCache settings for HunyuanVideo to speed up inference"
 
-    def process(self, rel_l1_thresh):
+    def process(self, rel_l1_thresh, cache_device):
+        if cache_device == "main_device":
+            teacache_device = mm.get_torch_device()
+        else:
+            teacache_device = mm.unet_offload_device()
         teacache_args = {
             "rel_l1_thresh": rel_l1_thresh,
+            "cache_device": teacache_device
         }
         return (teacache_args,)
 
@@ -1318,6 +1325,7 @@ class HyVideoSampler:
                 transformer.previous_residual = None
                 transformer.last_dimensions = (height, width, num_frames)
                 transformer.last_frame_count = num_frames
+                transformer.teacache_device = device
 
             transformer.enable_teacache = True
             transformer.num_steps = steps
