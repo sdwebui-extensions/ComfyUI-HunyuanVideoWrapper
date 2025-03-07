@@ -739,8 +739,9 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 if image_cond_latents is not None and not use_context_schedule:
                     if i2v_condition_type == "latent_concat":
                         latent_image_input = (torch.cat([image_cond_latents] * 2) if cfg_enabled else image_cond_latents)
-                        i2v_mask = torch.cat([i2v_mask] * 2) if cfg_enabled else i2v_mask
-                        latent_image_input = torch.cat([latent_image_input, i2v_mask], dim=1)
+                        if self.transformer.in_channels == 33:
+                            i2v_mask = torch.cat([i2v_mask] * 2) if cfg_enabled else i2v_mask
+                            latent_image_input = torch.cat([latent_image_input, i2v_mask], dim=1)
                         latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=1)
 
                 if self.transformer.guidance_embed:
