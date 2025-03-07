@@ -196,6 +196,8 @@ def get_1d_rotary_pos_embed(
     use_real: bool = False,
     theta_rescale_factor: float = 1.0,
     interpolation_factor: float = 1.0,
+    L_test: int = 100,
+    k: int = 0,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Precompute the frequency tensor for complex exponential (cis) with given dimensions.
