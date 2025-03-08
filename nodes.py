@@ -1236,6 +1236,9 @@ class HyVideoSampler:
         dtype = model["dtype"]
         transformer = model["pipe"].transformer
 
+        if isinstance(riflex_freq_index, str):
+            riflex_freq_index = 0
+
         #handle STG
         if stg_args is not None:
             if stg_args["stg_mode"] == "STG-A" and transformer.attention_mode != "sdpa":
