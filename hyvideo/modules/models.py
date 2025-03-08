@@ -1090,7 +1090,6 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
             if self.cnt == 0 or self.cnt == self.num_steps-1:
                 should_calc = True
                 self.accumulated_rel_l1_distance = 0
-                self.teacache_skipped_steps = 0
                 self.previous_modulated_input = modulated_inp.clone()
             else:
                 coefficients = [7.33226126e+02, -4.01131952e+02, 6.75869174e+01, -3.14987800e+00, 9.61237896e-02]

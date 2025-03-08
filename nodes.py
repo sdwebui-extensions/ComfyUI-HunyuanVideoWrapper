@@ -1338,6 +1338,7 @@ class HyVideoSampler:
                     transformer.last_frame_count != num_frames):
                 # Reset TeaCache state on dimension change
                 transformer.cnt = 0
+                transformer.teacache_skipped_steps = 0
                 transformer.accumulated_rel_l1_distance = 0
                 transformer.previous_modulated_input = None
                 transformer.previous_residual = None
@@ -1405,6 +1406,7 @@ class HyVideoSampler:
 
         if teacache_args is not None:
             log.info(f"TeaCache skipped {transformer.teacache_skipped_steps} steps")
+            transformer.teacache_skipped_steps = 0
 
         if force_offload:
             if model["manual_offloading"]:
