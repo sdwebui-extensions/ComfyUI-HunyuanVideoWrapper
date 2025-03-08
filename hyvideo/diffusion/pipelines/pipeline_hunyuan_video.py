@@ -942,6 +942,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                     else:
                         comfy_pbar.update(1)
 
-        if leapfusion_img2vid or i2v_condition_type == "latent_concat":
-            latents = latents[:, :, 1:, :, :]
+        if image_cond_latents is not None:
+            if leapfusion_img2vid or i2v_condition_type == "latent_concat":
+                latents = latents[:, :, 1:, :, :]
         return latents
