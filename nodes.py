@@ -322,11 +322,11 @@ class HyVideoModelLoader:
         sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
 
         in_channels = sd["img_in.proj.weight"].shape[1]
-        print("In channels: ", in_channels)
-        if in_channels == 16:
+        if in_channels == 16 and "i2v" in model.lower():
             i2v_condition_type = "token_replace"
-        elif in_channels == 33 or in_channels == 32:
+        else:
             i2v_condition_type = "latent_concat"
+        log.info(f"Condition type: {i2v_condition_type}")
 
         guidance_embed = sd.get("guidance_in.mlp.0.weight", False) is not False
 

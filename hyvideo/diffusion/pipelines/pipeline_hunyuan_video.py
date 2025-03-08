@@ -252,6 +252,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
+        if latents is not None:
+            latents = latents.to(device)
         noise = randn_tensor(shape, generator=generator, device=device, dtype=self.base_dtype)
     
         if freenoise:
@@ -310,11 +312,13 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             
             if frames_needed > current_frames:
                 repeat_factor = frames_needed - current_frames
-                additional_frame = torch.randn((latents.size(0), repeat_factor, latents.size(2), latents.size(3), latents.size(4)), dtype=latents.dtype, device=latents.device)
-                latents = torch.cat((additional_frame, latents), dim=1)
-                self.additional_frames = repeat_factor
+                additional_frame = torch.randn((latents.shape[0], latents.shape[1], repeat_factor, latents.shape[3], latents.shape[4]), dtype=latents.dtype, device=latents.device)
+                latents = torch.cat((additional_frame, latents), dim=2)
+                logger.info(f"Frames needed more than current frames, adding {repeat_factor} frames")
             elif frames_needed < current_frames:
-                latents = latents[:, :frames_needed, :, :, :]
+                latents = latents[:, :, :frames_needed, :, :]
+                logger.info(f"Frames needed less than current frames, cutting down to {frames_needed}")
+    
             latents = latents * (1 - latent_timestep / 1000) + latent_timestep / 1000 * noise
             print("latents shape:", latents.shape)
         elif image_cond_latents is not None and i2v_stability:
@@ -734,7 +738,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 t_expand = t.repeat(latent_model_input.shape[0])
 
                 if leapfusion_img2vid:
-                    latent_model_input[:, :, [0,], :, :] = original_latents[:, :, [0,], :, :].to(latent_model_input)
+                    latent_model_input[:, :, [0], :, :] = original_latents[:, :, [0], :, :].to(latent_model_input)
 
                 if image_cond_latents is not None and not use_context_schedule:
                     if i2v_condition_type == "latent_concat":
