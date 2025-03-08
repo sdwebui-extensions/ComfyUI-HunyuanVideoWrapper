@@ -411,9 +411,24 @@ class HyVideoModelLoader:
                     lora_sd = standardize_lora_key_format(lora_sd)
                     if l["blocks"]:
                         lora_sd = filter_state_dict_by_blocks(lora_sd, l["blocks"])
+                    
+                    # patch in channels for keyframe LoRA
+                    if "diffusion_model.img_in.proj.lora_A.weight" in lora_sd:
+                        from .hyvideo.modules.embed_layers import PatchEmbed
+                        if lora_sd["diffusion_model.img_in.proj.lora_A.weight"].shape[1] != in_channels:
+                            log.info(f"Different in_channels {lora_sd['diffusion_model.img_in.proj.lora_A.weight'].shape[1]} vs {in_channels}, patching...")
+                            new_img_in = PatchEmbed(
+                                patch_size=patcher.model.diffusion_model.patch_size,
+                                in_chans=32,
+                                embed_dim=patcher.model.diffusion_model.hidden_size,
+                            ).to(patcher.model.diffusion_model.device, dtype=patcher.model.diffusion_model.dtype)
+                            new_img_in.proj.weight.zero_()
+                            new_img_in.proj.weight[:, :in_channels].copy_(patcher.model.diffusion_model.img_in.proj.weight)
 
-                    #for k in lora_sd.keys():
-                    #   print(k)
+                            if patcher.model.diffusion_model.img_in.proj.bias is not None:
+                                new_img_in.proj.bias.copy_(patcher.model.diffusion_model.img_in.proj.bias)
+
+                            patcher.model.diffusion_model.img_in = new_img_in
 
                     patcher, _ = load_lora_for_models(patcher, None, lora_sd, lora_strength, 0)
 
@@ -1416,6 +1431,7 @@ class HyVideoDecode:
                 
                 "optional": {
                     "skip_latents": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Number of latents to skip from the start, can help with flashing"}),
+                    "balance_brightness": ("BOOLEAN", {"default": False, "tooltip": "Attempt to balance brightness of the output frames"}),
                 }
             }
 
@@ -1424,7 +1440,7 @@ class HyVideoDecode:
     FUNCTION = "decode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def decode(self, vae, samples, enable_vae_tiling, temporal_tiling_sample_size, spatial_tile_sample_min_size, auto_tile_size, skip_latents=0):
+    def decode(self, vae, samples, enable_vae_tiling, temporal_tiling_sample_size, spatial_tile_sample_min_size, auto_tile_size, skip_latents=0, balance_brightness=False):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         mm.soft_empty_cache()
@@ -1485,6 +1501,23 @@ class HyVideoDecode:
 
             video = video_processor.postprocess_video(video=video, output_type="pt")
             out = video[0].permute(0, 2, 3, 1).cpu().float()
+            # Balance all frames
+            if balance_brightness:
+                if out.shape[0] > 1:  # Multiple frames
+                    # Calculate target brightness (median of frame means)
+                    frame_means = torch.tensor([frame.mean().item() for frame in out])
+                    target_brightness = frame_means.median()
+                    
+                    # Scale each frame to target brightness
+                    for i in range(len(out)):
+                        current_mean = out[i].mean().item()
+                        if current_mean != 0:  # Avoid division by zero
+                            scale_factor = target_brightness / current_mean
+                            # Optional: limit scaling range
+                            scale_factor = max(min(scale_factor, 1.4), 0.5)
+                            out[i] = out[i] * scale_factor
+            log.info(f"VAE decode output min max {out.min()} {out.max()}")
+            out = out.clamp(0, 1)
         else:
             out = (video / 2 + 0.5).clamp(0, 1)
             out = out.permute(0, 2, 3, 1).cpu().float()
@@ -1492,6 +1525,79 @@ class HyVideoDecode:
         return (out,)
 
 #region VideoEncode
+class HyVideoEncodeKeyframes:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "vae": ("VAE",),
+                    "start_image": ("IMAGE",),
+                    "end_image": ("IMAGE", {"default": None, "tooltip": "End frame for dashtoon keyframe LoRA"}),
+                    "num_frames": ("INT", {"default": 49, "min": 1, "max": 1024, "step": 4}),
+                    "enable_vae_tiling": ("BOOLEAN", {"default": True, "tooltip": "Drastically reduces memory use but may introduce seams"}),
+                    "temporal_tiling_sample_size": ("INT", {"default": 64, "min": 4, "max": 256, "tooltip": "Smaller values use less VRAM, model default is 64, any other value will cause stutter"}),
+                    "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
+                    "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
+                    },
+                    "optional": {
+                        "noise_aug_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Strength of noise augmentation, helpful for leapfusion I2V where some noise can add motion and give sharper results"}),
+                        "latent_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Additional latent multiplier, helpful for leapfusion I2V where lower values allow for more motion"}),
+                        "latent_dist": (["sample", "mode"], {"default": "sample", "tooltip": "Sampling mode for the VAE, sample uses the latent distribution, mode uses the mode of the latent distribution"}),
+                    }
+                }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("samples",)
+    FUNCTION = "encode"
+    CATEGORY = "HunyuanVideoWrapper"
+
+    def encode(self, vae, start_image, end_image, num_frames, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, 
+               spatial_tile_sample_min_size, noise_aug_strength=0.0, latent_strength=1.0, latent_dist="sample"):
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+
+        generator = torch.Generator(device=torch.device("cpu"))#.manual_seed(seed)
+        vae.to(device)
+        if not auto_tile_size:
+            vae.tile_latent_min_tsize = temporal_tiling_sample_size // 4
+            vae.tile_sample_min_size = spatial_tile_sample_min_size
+            vae.tile_latent_min_size = spatial_tile_sample_min_size // 8
+            if temporal_tiling_sample_size != 64:
+                vae.t_tile_overlap_factor = 0.0
+            else:
+                vae.t_tile_overlap_factor = 0.25
+        else:
+            #defaults
+            vae.tile_latent_min_tsize = 16
+            vae.tile_sample_min_size = 256
+            vae.tile_latent_min_size = 32
+
+        image_1 = (start_image.clone()).to(vae.dtype).to(device).unsqueeze(0).permute(0, 4, 1, 2, 3) # B, C, T, H, W
+        image_2 = (end_image.clone()).to(vae.dtype).to(device).unsqueeze(0).permute(0, 4, 1, 2, 3) # B, C, T, H, W
+        if noise_aug_strength > 0.0:
+            image_1 = add_noise_to_reference_video(image_1, ratio=noise_aug_strength)
+            image_2 = add_noise_to_reference_video(image_2, ratio=noise_aug_strength)
+
+        # latent_video_length = (num_frames - 1) // 4 + 1
+        # print(image_1.shape, image_2.shape, latent_video_length)
+        
+        video_frames = torch.zeros(1, image_1.shape[1], num_frames-2, image_1.shape[3], image_1.shape[4], device=image_1.device, dtype=image_1.dtype)
+        print("video_frames", video_frames.shape)
+        video_frames = torch.cat([image_1, video_frames, image_2], dim=2) * 2.0 - 1.0
+        
+        if enable_vae_tiling:
+            vae.enable_tiling()
+        if latent_dist == "sample":
+            latents = vae.encode(video_frames).latent_dist.sample(generator)
+        elif latent_dist == "mode":
+            latents = vae.encode(video_frames).latent_dist.mode()
+        if latent_strength != 1.0:
+            latents *= latent_strength
+        #latents = latents * vae.config.scaling_factor
+        vae.to(offload_device)
+        log.info(f"encoded latents shape {latents.shape}")
+
+        return ({"samples": latents},)
+    
 class HyVideoEncode:
     @classmethod
     def INPUT_TYPES(s):
@@ -1550,7 +1656,7 @@ class HyVideoEncode:
             latents *= latent_strength
         #latents = latents * vae.config.scaling_factor
         vae.to(offload_device)
-        print("encoded latents shape",latents.shape)
+        log.info(f"encoded latents shape {latents.shape}")
 
 
         return ({"samples": latents},)
@@ -1702,7 +1808,8 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoEnhanceAVideo": HyVideoEnhanceAVideo,
     "HyVideoTeaCache": HyVideoTeaCache,
     "HyVideoGetClosestBucketSize": HyVideoGetClosestBucketSize,
-    "HyVideoI2VEncode": HyVideoI2VEncode
+    "HyVideoI2VEncode": HyVideoI2VEncode,
+    "HyVideoEncodeKeyframes": HyVideoEncodeKeyframes
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1727,5 +1834,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoEnhanceAVideo": "HunyuanVideo Enhance A Video",
     "HyVideoTeaCache": "HunyuanVideo TeaCache",
     "HyVideoGetClosestBucketSize": "HunyuanVideo Get Closest Bucket Size",
-    "HyVideoI2VEncode": "HyVideo I2V Encode"
+    "HyVideoI2VEncode": "HyVideo I2V Encode",
+    "HyVideoEncodeKeyframes": "HyVideo Encode Keyframes"
     }

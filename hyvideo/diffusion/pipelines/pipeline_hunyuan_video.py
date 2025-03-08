@@ -290,7 +290,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 # apply shuffled indexes
                 #print("place_idx:", place_idx, "delta:", delta, "list_idx:", list_idx)
                 noise[:, :, place_idx:place_idx + delta, :, :] = noise[:, :, list_idx, :, :]
-
+        logger.info(f"image_cond_latents shape {image_cond_latents.shape} ")
         i2v_mask = None
         if image_cond_latents is not None:
             if i2v_condition_type == "latent_concat":
@@ -321,6 +321,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
     
             latents = latents * (1 - latent_timestep / 1000) + latent_timestep / 1000 * noise
             print("latents shape:", latents.shape)
+
         elif image_cond_latents is not None and i2v_stability:
             if image_cond_latents.shape[2] == 1:
                 img_latents = image_cond_latents.repeat(1, 1, video_length, 1, 1)
@@ -330,6 +331,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             latents = noise * t + img_latents * (1 - t)
             latents = latents.to(dtype=self.base_dtype)
         else:
+            logger.info("Using random noise only")
             latents = noise
 
         # Check existence to make it compatible with FlowMatchEulerDiscreteScheduler
