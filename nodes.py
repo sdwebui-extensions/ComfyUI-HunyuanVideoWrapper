@@ -1413,14 +1413,18 @@ class HyVideoDecode:
                     "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
                     "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
                     },
+                
+                "optional": {
+                    "skip_latents": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Number of latents to skip from the start, can help with flashing"}),
                 }
+            }
 
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("images",)
     FUNCTION = "decode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def decode(self, vae, samples, enable_vae_tiling, temporal_tiling_sample_size, spatial_tile_sample_min_size, auto_tile_size):
+    def decode(self, vae, samples, enable_vae_tiling, temporal_tiling_sample_size, spatial_tile_sample_min_size, auto_tile_size, skip_latents=0):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         mm.soft_empty_cache()
@@ -1455,6 +1459,9 @@ class HyVideoDecode:
             )
         #latents = latents / vae.config.scaling_factor
         latents = latents.to(vae.dtype).to(device)
+
+        if skip_latents > 0:
+            latents = latents[:, :, skip_latents:]
 
         if enable_vae_tiling:
             vae.enable_tiling()
