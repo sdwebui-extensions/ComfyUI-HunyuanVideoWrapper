@@ -290,7 +290,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 # apply shuffled indexes
                 #print("place_idx:", place_idx, "delta:", delta, "list_idx:", list_idx)
                 noise[:, :, place_idx:place_idx + delta, :, :] = noise[:, :, list_idx, :, :]
-        logger.info(f"image_cond_latents shape {image_cond_latents.shape} ")
+        
         i2v_mask = None
         if image_cond_latents is not None:
             if i2v_condition_type == "latent_concat":
