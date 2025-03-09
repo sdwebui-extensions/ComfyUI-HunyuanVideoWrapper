@@ -1043,30 +1043,31 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         if self.offload_img_in:
             self.img_in.to(self.offload_device, non_blocking=True)
 
+        max_seqlen_q, max_seqlen_kv, attn_mask, cu_seqlens_q, cu_seqlens_kv = None, None, None, None, None
         txt_seq_len = txt.shape[1]
         img_seq_len = img.shape[1]
-        max_seqlen_q = max_seqlen_kv = img_seq_len + txt_seq_len
 
-        if "varlen" not in self.attention_mode:
-            cu_seqlens_q, cu_seqlens_kv = None, None
-            # Create a square boolean mask filled with False
-            attn_mask = torch.zeros((1, max_seqlen_q, max_seqlen_q), dtype=torch.bool, device=text_mask.device)
-
-            # Calculate the valid attention regions
-            text_len = text_mask[0].sum().item()
-            total_len = text_len + img_seq_len
-
-            # Allow attention to all tokens up to total_len
-            attn_mask[0, :total_len, :total_len] = True
-        else:
-            attn_mask = None
+        if "varlen" in self.attention_mode: #just for backwards compatibility
+            max_seqlen_q = max_seqlen_kv = img_seq_len + txt_seq_len
+            text_mask = torch.ones((1, text_states.shape[1]), dtype=torch.bool, device=text_states.device)
             # Compute cu_squlens for flash attention
             cu_seqlens_q = get_cu_seqlens(text_mask, img_seq_len)
             cu_seqlens_kv = cu_seqlens_q
 
         freqs_cis = (freqs_cos, freqs_sin) if freqs_cos is not None else None
 
-        block_args = [cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, freqs_cis, attn_mask, self.upcast_rope, token_replace_vec, first_frame_token_num, self.i2v_condition_type]
+        block_args = [
+            cu_seqlens_q, 
+            cu_seqlens_kv, 
+            max_seqlen_q, 
+            max_seqlen_kv, 
+            freqs_cis, 
+            attn_mask, 
+            self.upcast_rope, 
+            token_replace_vec, 
+            first_frame_token_num, 
+            self.i2v_condition_type
+            ]
 
         #tea_cache
         if self.enable_teacache:

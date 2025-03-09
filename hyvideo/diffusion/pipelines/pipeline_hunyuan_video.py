@@ -541,41 +541,41 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         batch_size = 1
         device = self._execution_device
 
-        prompt_embeds = prompt_embed_dict["prompt_embeds"]
-        negative_prompt_embeds = prompt_embed_dict["negative_prompt_embeds"]
-        prompt_mask = prompt_embed_dict["attention_mask"]
-        negative_prompt_mask = prompt_embed_dict["negative_attention_mask"]
-        prompt_embeds_2 = prompt_embed_dict["prompt_embeds_2"]
-        negative_prompt_embeds_2 = prompt_embed_dict["negative_prompt_embeds_2"]
+        prompt_embeds = prompt_embed_dict.get("prompt_embeds", None)
+        negative_prompt_embeds = prompt_embed_dict.get("negative_prompt_embeds", None)
+        #prompt_mask = prompt_embed_dict.get("attention_mask", None)
+        #negative_prompt_mask = prompt_embed_dict.get("negative_attention_mask", None)
+        prompt_embeds_2 = prompt_embed_dict.get("prompt_embeds_2", None)
+        negative_prompt_embeds_2 = prompt_embed_dict.get("negative_prompt_embeds_2", None)
 
         # For classifier free guidance, we need to do two forward passes.
         # Here we concatenate the unconditional and text embeddings into a single batch
         # to avoid doing two forward passes
         if self.do_classifier_free_guidance and not self.do_spatio_temporal_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
-            if prompt_mask is not None:
-                prompt_mask = torch.cat([negative_prompt_mask, prompt_mask])
+            # if prompt_mask is not None:
+            #     prompt_mask = torch.cat([negative_prompt_mask, prompt_mask])
             if prompt_embeds_2 is not None:
                 prompt_embeds_2 = torch.cat([negative_prompt_embeds_2, prompt_embeds_2])
         elif self.do_classifier_free_guidance and self.do_spatio_temporal_guidance:
             prompt_embeds = torch.cat(
                 [negative_prompt_embeds, prompt_embeds, prompt_embeds]
             )
-            if prompt_mask is not None:
-                prompt_mask = torch.cat([negative_prompt_mask, prompt_mask, prompt_mask])
+            # if prompt_mask is not None:
+            #     prompt_mask = torch.cat([negative_prompt_mask, prompt_mask, prompt_mask])
             if prompt_embeds_2 is not None:
                 prompt_embeds_2 = torch.cat(
                     [negative_prompt_embeds_2, prompt_embeds_2, prompt_embeds_2]
                 )
         elif self.do_spatio_temporal_guidance:
             prompt_embeds = torch.cat([prompt_embeds, prompt_embeds])
-            if prompt_mask is not None:
-                prompt_mask = torch.cat([prompt_mask, prompt_mask])
+            # if prompt_mask is not None:
+            #     prompt_mask = torch.cat([prompt_mask, prompt_mask])
             if prompt_embeds_2 is not None:
                 prompt_embeds_2 = torch.cat([prompt_embeds_2, prompt_embeds_2])
 
         prompt_embeds = prompt_embeds.to(device = device, dtype = self.base_dtype)
-        prompt_mask = prompt_mask.to(device)
+        #prompt_mask = prompt_mask.to(device)
         if prompt_embeds_2 is not None:
             prompt_embeds_2 = prompt_embeds_2.to(device = device, dtype = self.base_dtype)
 
@@ -695,7 +695,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
 
                 latent_model_input = latents
                 input_prompt_embeds = prompt_embeds
-                input_prompt_mask = prompt_mask 
+                #input_prompt_mask = prompt_mask 
                 input_prompt_embeds_2 = prompt_embeds_2
                 cfg_enabled = False
                 stg_enabled = False
@@ -712,7 +712,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                         stg_mode = None
                         stg_block_idx = -1
                         input_prompt_embeds = prompt_embeds[0].unsqueeze(0)
-                        input_prompt_mask = prompt_mask[0].unsqueeze(0)
+                        #input_prompt_mask = prompt_mask[0].unsqueeze(0)
                         input_prompt_embeds_2 = prompt_embeds_2[0].unsqueeze(0)
                         latent_model_input = latents
                 else:
@@ -726,7 +726,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                             cfg_enabled = True
                         else:
                             input_prompt_embeds = prompt_embeds[1].unsqueeze(0)
-                            input_prompt_mask = prompt_mask[1].unsqueeze(0)
+                            #input_prompt_mask = prompt_mask[1].unsqueeze(0)
                             input_prompt_embeds_2 = prompt_embeds_2[1].unsqueeze(0)
                 
                 if feta_args is not None:
@@ -799,7 +799,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 partial_latent_model_input, 
                                 t_expand,
                                 text_states=input_prompt_embeds,
-                                text_mask=input_prompt_mask,
+                                #text_mask=input_prompt_mask,
                                 text_states_2=input_prompt_embeds_2,
                                 freqs_cos=freqs_cos,
                                 freqs_sin=freqs_sin,
@@ -835,7 +835,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 latent_model_input,  # [2, 16, 33, 24, 42]
                                 t_expand,  # [2]
                                 text_states=input_prompt_embeds,  # [2, 256, 4096]
-                                text_mask=input_prompt_mask,  # [2, 256]
+                                #text_mask=input_prompt_mask,  # [2, 256]
                                 text_states_2=input_prompt_embeds_2,  # [2, 768]
                                 freqs_cos=freqs_cos,  # [seqlen, head_dim]
                                 freqs_sin=freqs_sin,  # [seqlen, head_dim]
@@ -849,7 +849,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 latent_model_input[0].unsqueeze(0),
                                 t_expand[0].unsqueeze(0),
                                 text_states=input_prompt_embeds[0].unsqueeze(0), 
-                                text_mask=input_prompt_mask[0].unsqueeze(0), 
+                                #text_mask=input_prompt_mask[0].unsqueeze(0), 
                                 text_states_2=input_prompt_embeds_2[0].unsqueeze(0), 
                                 freqs_cos=freqs_cos,
                                 freqs_sin=freqs_sin,
@@ -862,7 +862,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 latent_model_input[1].unsqueeze(0),
                                 t_expand[1].unsqueeze(0),
                                 text_states=input_prompt_embeds[1].unsqueeze(0), 
-                                text_mask=input_prompt_mask[1].unsqueeze(0), 
+                                #text_mask=input_prompt_mask[1].unsqueeze(0), 
                                 text_states_2=input_prompt_embeds_2[1].unsqueeze(0), 
                                 freqs_cos=freqs_cos,
                                 freqs_sin=freqs_sin,

@@ -283,6 +283,7 @@ class HyVideoModelLoader:
                 "attention_mode": ([
                     "sdpa",
                     "flash_attn_varlen",
+                    "sageattn",
                     "sageattn_varlen",
                     "comfy",
                     ], {"default": "flash_attn"}),
@@ -302,7 +303,7 @@ class HyVideoModelLoader:
     def loadmodel(self, model, base_precision, load_device,  quantization,
                   compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, auto_cpu_offload=False, upcast_rope=True):
         transformer = None
-        #mm.unload_all_models()
+        mm.unload_all_models()
         mm.soft_empty_cache()
         manual_offloading = True
         if "sage" in attention_mode:
@@ -654,6 +655,46 @@ class HyVideoTorchCompileSettings:
         return (compile_args, )
 
 #region TextEncode
+    
+class HyVideoTextEmbedBridge:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "positive": ("CONDITIONING", ),
+            },
+            "optional": {
+                "negative": ("CONDITIONING", ),
+                "hyvid_cfg": ("HYVID_CFG", {"tooltip": "The prompt from the cfg node is not used, only the settings"}),
+            }
+        }
+    RETURN_TYPES = ("HYVIDEMBEDS",)
+    RETURN_NAMES = ("hyvid_embeds",)
+    FUNCTION = "convert"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "Acts as a bridge between the native ComfyUI conditioning and the HunyuanVideoWrapper embeds"
+
+    def convert(self, positive, negative=None, hyvid_cfg=None): 
+        positive_cond = positive[0][0]
+        positive_pooled = positive[0][1]["pooled_output"]
+        positive_attention_mask = torch.ones(positive_cond.shape[1], dtype=torch.bool, device=positive_cond.device).unsqueeze(0)
+        negative_cond, negative_attention_mask, negative_pooled = None, None, None
+        if negative is not None:
+            negative_cond = negative[0][0]
+            negative_pooled = negative[0][1]["pooled_output"]
+            negative_attention_mask = torch.ones(negative_cond.shape[1], dtype=torch.bool, device=negative_cond.device).unsqueeze(0)
+        prompt_embeds_dict = {
+                "prompt_embeds": positive_cond,
+                "negative_prompt_embeds": negative_cond,
+                "attention_mask": positive_attention_mask,
+                "negative_attention_mask": negative_attention_mask,
+                "prompt_embeds_2": positive_pooled,
+                "negative_prompt_embeds_2": negative_pooled,
+                "cfg": torch.tensor(hyvid_cfg["cfg"]) if hyvid_cfg is not None else None,
+                "start_percent": torch.tensor(hyvid_cfg["start_percent"]) if hyvid_cfg is not None else None,
+                "end_percent": torch.tensor(hyvid_cfg["end_percent"]) if hyvid_cfg is not None else None,
+                "batched_cfg": torch.tensor(hyvid_cfg["batched_cfg"]) if hyvid_cfg is not None else None,
+            }
+        return (prompt_embeds_dict,)
 
 class DownloadAndLoadHyVideoTextEncoder:
     @classmethod
@@ -701,7 +742,7 @@ class DownloadAndLoadHyVideoTextEncoder:
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.bfloat16
-            )
+           )
             
         if clip_model != "disabled":
             clip_model_path = os.path.join(folder_paths.models_dir, "clip", "clip-vit-large-patch14")
@@ -931,10 +972,21 @@ class HyVideoTextEncode:
 
                 # max_length = prompt_embeds.shape[1]
                 uncond_input = text_encoder.text2tokens(uncond_tokens, prompt_template=prompt_template_dict)
+                uncond_image = None
+                if image is not None:
+                    if text_encoder.text_encoder_type == "vlm":
+                        uncond_image = torch.zeros_like(semantic_images.squeeze(0))
 
                 negative_prompt_outputs = text_encoder.encode(
-                    uncond_input, prompt_template=prompt_template_dict, device=device
+                    uncond_input, 
+                    prompt_template=prompt_template_dict, 
+                    device=device,
+                    image_token_selection_expr=image_token_selection_expr,
+                    semantic_images = [uncond_image] if text_encoder.text_encoder_type == "vlm" else None,
+                    image_embed_interleave=image_embed_interleave,
+                    data_type=prompt_template,
                 )
+                
                 negative_prompt_embeds = negative_prompt_outputs.hidden_state
 
                 negative_attention_mask = negative_prompt_outputs.attention_mask
@@ -1001,15 +1053,21 @@ class HyVideoTextEncode:
             attention_mask_2 = None
             negative_attention_mask_2 = None
 
+        last_token = (attention_mask != 0).sum(dim=1).max().item()
+        prompt_embeds = prompt_embeds[:, :last_token, :]
+        if negative_prompt_embeds is not None:
+            last_token = (negative_attention_mask != 0).sum(dim=1).max().item()
+            negative_prompt_embeds = negative_prompt_embeds[:, :last_token, :]
+
         prompt_embeds_dict = {
                 "prompt_embeds": prompt_embeds,
                 "negative_prompt_embeds": negative_prompt_embeds,
-                "attention_mask": attention_mask,
-                "negative_attention_mask": negative_attention_mask,
+                #"attention_mask": attention_mask,
+                #"negative_attention_mask": negative_attention_mask,
                 "prompt_embeds_2": prompt_embeds_2,
                 "negative_prompt_embeds_2": negative_prompt_embeds_2,
-                "attention_mask_2": attention_mask_2,
-                "negative_attention_mask_2": negative_attention_mask_2,
+                #"attention_mask_2": attention_mask_2,
+                #"negative_attention_mask_2": negative_attention_mask_2,
                 "cfg": torch.tensor(hyvid_cfg["cfg"]) if hyvid_cfg is not None else None,
                 "start_percent": torch.tensor(hyvid_cfg["start_percent"]) if hyvid_cfg is not None else None,
                 "end_percent": torch.tensor(hyvid_cfg["end_percent"]) if hyvid_cfg is not None else None,
@@ -1352,6 +1410,7 @@ class HyVideoSampler:
         else:
             transformer.enable_teacache = False
 
+        mm.unload_all_models()
         mm.soft_empty_cache()
         gc.collect()
 
@@ -1811,7 +1870,8 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoTeaCache": HyVideoTeaCache,
     "HyVideoGetClosestBucketSize": HyVideoGetClosestBucketSize,
     "HyVideoI2VEncode": HyVideoI2VEncode,
-    "HyVideoEncodeKeyframes": HyVideoEncodeKeyframes
+    "HyVideoEncodeKeyframes": HyVideoEncodeKeyframes,
+    "HyVideoTextEmbedBridge": HyVideoTextEmbedBridge,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1837,5 +1897,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoTeaCache": "HunyuanVideo TeaCache",
     "HyVideoGetClosestBucketSize": "HunyuanVideo Get Closest Bucket Size",
     "HyVideoI2VEncode": "HyVideo I2V Encode",
-    "HyVideoEncodeKeyframes": "HyVideo Encode Keyframes"
+    "HyVideoEncodeKeyframes": "HyVideo Encode Keyframes",
+    "HyVideoTextEmbedBridge": "HyVideo TextEmbed Bridge",
     }
