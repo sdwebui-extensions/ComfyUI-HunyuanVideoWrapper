@@ -197,15 +197,35 @@ class MMDoubleStreamBlock(nn.Module):
         freqs_cis: tuple = None,
         attn_mask: Optional[torch.Tensor] = None,
         upcast_rope: bool = True,
+        token_replace_vec: torch.Tensor = None,
+        first_frame_token_num: int = None,
+        condition_type: str = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        (
-            img_mod1_shift,
-            img_mod1_scale,
-            img_mod1_gate,
-            img_mod2_shift,
-            img_mod2_scale,
-            img_mod2_gate,
-        ) = self.img_mod(vec).chunk(6, dim=-1)
+        if condition_type == "token_replace":
+            img_mod1, token_replace_img_mod1 = self.img_mod(vec, condition_type=condition_type, \
+                                                            token_replace_vec=token_replace_vec)
+            (img_mod1_shift,
+             img_mod1_scale,
+             img_mod1_gate,
+             img_mod2_shift,
+             img_mod2_scale,
+             img_mod2_gate) = img_mod1.chunk(6, dim=-1)
+            (tr_img_mod1_shift,
+             tr_img_mod1_scale,
+             tr_img_mod1_gate,
+             tr_img_mod2_shift,
+             tr_img_mod2_scale,
+             tr_img_mod2_gate) = token_replace_img_mod1.chunk(6, dim=-1)
+        else:
+            (
+                img_mod1_shift,
+                img_mod1_scale,
+                img_mod1_gate,
+                img_mod2_shift,
+                img_mod2_scale,
+                img_mod2_gate,
+            ) = self.img_mod(vec).chunk(6, dim=-1)
+
         (
             txt_mod1_shift,
             txt_mod1_scale,
@@ -217,9 +237,16 @@ class MMDoubleStreamBlock(nn.Module):
 
         # Prepare image for attention.
         img_modulated = self.img_norm1(img)
-        img_modulated = modulate(
-            img_modulated, shift=img_mod1_shift, scale=img_mod1_scale
-        )
+        if condition_type == "token_replace":
+            img_modulated = modulate(
+                img_modulated, shift=img_mod1_shift, scale=img_mod1_scale, condition_type=condition_type,
+                tr_shift=tr_img_mod1_shift, tr_scale=tr_img_mod1_scale,
+                first_frame_token_num=first_frame_token_num
+            )
+        else:
+            img_modulated = modulate(
+                img_modulated, shift=img_mod1_shift, scale=img_mod1_scale
+            )
         img_qkv = self.img_attn_qkv(img_modulated)
         img_q, img_k, img_v = rearrange(
             img_qkv, "B L (K H D) -> K B L H D", K=3, H=self.heads_num
@@ -273,15 +300,29 @@ class MMDoubleStreamBlock(nn.Module):
             img_attn *= feta_scores
 
         # Calculate the img bloks.
-        img = img + apply_gate(self.img_attn_proj(img_attn), gate=img_mod1_gate)
-        img = img + apply_gate(
-            self.img_mlp(
-                modulate(
-                    self.img_norm2(img), shift=img_mod2_shift, scale=img_mod2_scale
-                )
-            ),
-            gate=img_mod2_gate,
-        )
+        if condition_type == "token_replace":
+            img = img + apply_gate(self.img_attn_proj(img_attn), gate=img_mod1_gate, condition_type=condition_type,
+                                   tr_gate=tr_img_mod1_gate, first_frame_token_num=first_frame_token_num)
+            img = img + apply_gate(
+                self.img_mlp(
+                    modulate(
+                        self.img_norm2(img), shift=img_mod2_shift, scale=img_mod2_scale, condition_type=condition_type,
+                        tr_shift=tr_img_mod2_shift, tr_scale=tr_img_mod2_scale, first_frame_token_num=first_frame_token_num
+                    )
+                ),
+                gate=img_mod2_gate, condition_type=condition_type,
+                tr_gate=tr_img_mod2_gate, first_frame_token_num=first_frame_token_num
+            )
+        else:
+            img = img + apply_gate(self.img_attn_proj(img_attn), gate=img_mod1_gate)
+            img = img + apply_gate(
+                self.img_mlp(
+                    modulate(
+                        self.img_norm2(img), shift=img_mod2_shift, scale=img_mod2_scale
+                    )
+                ),
+                gate=img_mod2_gate,
+            )
 
         # Calculate the txt bloks.
         txt = txt + apply_gate(self.txt_attn_proj(txt_attn), gate=txt_mod1_gate)
@@ -382,10 +423,29 @@ class MMSingleStreamBlock(nn.Module):
         freqs_cis: Tuple[torch.Tensor, torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
         upcast_rope: bool = True,
+        token_replace_vec: torch.Tensor = None,
+        first_frame_token_num: int = None,
+        condition_type: str = None,
         stg_mode: Optional[str] = None,
+        
     ) -> torch.Tensor:
-        mod_shift, mod_scale, mod_gate = self.modulation(vec).chunk(3, dim=-1)
-        x_mod = modulate(self.pre_norm(x), shift=mod_shift, scale=mod_scale)
+        if condition_type == "token_replace":
+            mod, tr_mod = self.modulation(vec,
+                                          condition_type=condition_type,
+                                          token_replace_vec=token_replace_vec)
+            (mod_shift,
+             mod_scale,
+             mod_gate) = mod.chunk(3, dim=-1)
+            (tr_mod_shift,
+             tr_mod_scale,
+             tr_mod_gate) = tr_mod.chunk(3, dim=-1)
+        else:
+            mod_shift, mod_scale, mod_gate = self.modulation(vec).chunk(3, dim=-1)
+        if condition_type == "token_replace":
+            x_mod = modulate(self.pre_norm(x), shift=mod_shift, scale=mod_scale, condition_type=condition_type,
+                             tr_shift=tr_mod_shift, tr_scale=tr_mod_scale, first_frame_token_num=first_frame_token_num)
+        else:
+            x_mod = modulate(self.pre_norm(x), shift=mod_shift, scale=mod_scale)
         qkv, mlp = torch.split(
             self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1
         )
@@ -473,10 +533,12 @@ class MMSingleStreamBlock(nn.Module):
         
             # Compute activation in mlp stream, cat again and run second linear layer.
             output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
-            output = x + apply_gate(output, gate=mod_gate)
-
-            
-            return output
+            if condition_type == "token_replace":
+                output = x + apply_gate(output, gate=mod_gate, condition_type=condition_type,
+                                        tr_gate=tr_mod_gate, first_frame_token_num=first_frame_token_num)
+                return output
+            else:
+                return x + apply_gate(output, gate=mod_gate)
 
 
 class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
@@ -552,6 +614,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         use_attention_mask: bool = True,
         text_states_dim: int = 4096,
         text_states_dim_2: int = 768,
+        i2v_condition_type: str = "latent_concat",
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
         main_device: Optional[torch.device] = None,
@@ -571,6 +634,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         self.main_device = main_device
         self.offload_device = offload_device
         self.attention_mode = attention_mode
+        self.i2v_condition_type = i2v_condition_type
 
         # Text projection. Default to linear projection.
         # Alternative: TokenRefiner. See more details (LI-DiT): http://arxiv.org/abs/2406.11831
@@ -695,6 +759,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         self.previous_residual = None
         self.last_dimensions = None
         self.last_frame_count = None
+        self.teacache_device = None
 
     # thanks @2kpr for the initial block swap code!
     def block_swap(self, double_blocks_to_swap, single_blocks_to_swap, offload_txt_in=False, offload_img_in=False):
@@ -935,9 +1000,23 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         # Prepare modulation vectors.
         vec = self.time_in(t)
 
+        if self.i2v_condition_type == "token_replace":
+            token_replace_t = torch.zeros_like(t)
+            token_replace_vec = self.time_in(token_replace_t)
+            first_frame_token_num = th * tw
+        else:
+            token_replace_vec = None
+            first_frame_token_num = None
+            # token_replace_mask_img = None
+            # token_replace_mask_txt = None
+
         # text modulation
         if text_states_2 is not None:
-            vec = vec + self.vector_in(text_states_2)
+            vec_2 = self.vector_in(text_states_2)
+            vec = vec + vec_2
+            if self.i2v_condition_type == "token_replace":
+                token_replace_vec = token_replace_vec + vec_2
+
 
         # guidance modulation
         if guidance is not None:
@@ -964,30 +1043,31 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         if self.offload_img_in:
             self.img_in.to(self.offload_device, non_blocking=True)
 
+        max_seqlen_q, max_seqlen_kv, attn_mask, cu_seqlens_q, cu_seqlens_kv = None, None, None, None, None
         txt_seq_len = txt.shape[1]
         img_seq_len = img.shape[1]
-        max_seqlen_q = max_seqlen_kv = img_seq_len + txt_seq_len
 
-        if "varlen" not in self.attention_mode:
-            cu_seqlens_q, cu_seqlens_kv = None, None
-            # Create a square boolean mask filled with False
-            attn_mask = torch.zeros((1, max_seqlen_q, max_seqlen_q), dtype=torch.bool, device=text_mask.device)
-
-            # Calculate the valid attention regions
-            text_len = text_mask[0].sum().item()
-            total_len = text_len + img_seq_len
-
-            # Allow attention to all tokens up to total_len
-            attn_mask[0, :total_len, :total_len] = True
-        else:
-            attn_mask = None
+        if "varlen" in self.attention_mode: #just for backwards compatibility
+            max_seqlen_q = max_seqlen_kv = img_seq_len + txt_seq_len
+            text_mask = torch.ones((1, text_states.shape[1]), dtype=torch.bool, device=text_states.device)
             # Compute cu_squlens for flash attention
             cu_seqlens_q = get_cu_seqlens(text_mask, img_seq_len)
             cu_seqlens_kv = cu_seqlens_q
 
         freqs_cis = (freqs_cos, freqs_sin) if freqs_cos is not None else None
 
-        block_args = [cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, freqs_cis, attn_mask, self.upcast_rope]
+        block_args = [
+            cu_seqlens_q, 
+            cu_seqlens_kv, 
+            max_seqlen_q, 
+            max_seqlen_kv, 
+            freqs_cis, 
+            attn_mask, 
+            self.upcast_rope, 
+            token_replace_vec, 
+            first_frame_token_num, 
+            self.i2v_condition_type
+            ]
 
         #tea_cache
         if self.enable_teacache:
@@ -1030,7 +1110,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                 self.teacache_skipped_steps += 1
                 # Verify tensor dimensions match before adding
                 if img.shape == self.previous_residual.shape:
-                    img = img + self.previous_residual
+                    img = img + self.previous_residual.to(img.device)
                 else:
                     should_calc = True # Force recalculation if dimensions don't match
 
@@ -1043,7 +1123,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                 x = _process_single_blocks(x, vec, txt.shape[1], block_args, stg_mode, stg_block_idx)
 
                 img = x[:, :img_seq_len, ...]
-                self.previous_residual = img - ori_img
+                self.previous_residual = (img - ori_img).to(self.teacache_device)
         else:
             # Pass through DiT blocks
             img, txt = _process_double_blocks(img, txt, vec, block_args)

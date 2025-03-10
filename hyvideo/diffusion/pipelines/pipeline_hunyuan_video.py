@@ -235,8 +235,10 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         freenoise=False, 
         context_size=None, 
         context_overlap=None,
-        official_i2v=False,
+        i2v_condition_type=None,
         image_cond_latents=None,
+        i2v_stability=True,
+        
     ):
         shape = (
             batch_size,
@@ -250,6 +252,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
+        if latents is not None:
+            latents = latents.to(device)
         noise = randn_tensor(shape, generator=generator, device=device, dtype=self.base_dtype)
     
         if freenoise:
@@ -286,21 +290,20 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 # apply shuffled indexes
                 #print("place_idx:", place_idx, "delta:", delta, "list_idx:", list_idx)
                 noise[:, :, place_idx:place_idx + delta, :, :] = noise[:, :, list_idx, :, :]
-
+        
         i2v_mask = None
-        if official_i2v:
-            # Create mask
-            i2v_mask = torch.zeros(shape[0], 1, shape[2], shape[3], shape[4], device=device)
-            i2v_mask[:, :, 0, ...] = 1.0
-
         if image_cond_latents is not None:
-            if image_cond_latents.shape[2] == 1:      
-                padding = torch.zeros(shape, device=device)
-                padding[:, :, 0:1, :, :] = image_cond_latents
-                image_cond_latents = padding
+            if i2v_condition_type == "latent_concat":
+                # Create mask
+                i2v_mask = torch.zeros(shape[0], 1, shape[2], shape[3], shape[4], device=device)
+                i2v_mask[:, :, 0, ...] = 1.0
+                if image_cond_latents.shape[2] == 1:      
+                    padding = torch.zeros(shape, device=device)
+                    padding[:, :, 0:1, :, :] = image_cond_latents
+                    image_cond_latents = padding
 
         if denoise_strength < 1.0:
-            if official_i2v:
+            if i2v_condition_type == "latent_concat":
                 latents = torch.cat((latents[:,:,0].unsqueeze(2), latents), dim=2)
             timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, denoise_strength, device)
             latent_timestep = timesteps[:1]
@@ -309,25 +312,33 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             
             if frames_needed > current_frames:
                 repeat_factor = frames_needed - current_frames
-                additional_frame = torch.randn((latents.size(0), repeat_factor, latents.size(2), latents.size(3), latents.size(4)), dtype=latents.dtype, device=latents.device)
-                latents = torch.cat((additional_frame, latents), dim=1)
-                self.additional_frames = repeat_factor
+                additional_frame = torch.randn((latents.shape[0], latents.shape[1], repeat_factor, latents.shape[3], latents.shape[4]), dtype=latents.dtype, device=latents.device)
+                latents = torch.cat((additional_frame, latents), dim=2)
+                logger.info(f"Frames needed more than current frames, adding {repeat_factor} frames")
             elif frames_needed < current_frames:
-                latents = latents[:, :frames_needed, :, :, :]
+                latents = latents[:, :, :frames_needed, :, :]
+                logger.info(f"Frames needed less than current frames, cutting down to {frames_needed}")
+    
             latents = latents * (1 - latent_timestep / 1000) + latent_timestep / 1000 * noise
             print("latents shape:", latents.shape)
-        elif official_i2v:
+
+        elif image_cond_latents is not None and i2v_stability:
+            if image_cond_latents.shape[2] == 1:
+                img_latents = image_cond_latents.repeat(1, 1, video_length, 1, 1)
+            else:
+                img_latents = image_cond_latents
             t = torch.tensor([0.999]).to(device=device)
-            latents = noise * t + image_cond_latents * (1 - t)
+            latents = noise * t + img_latents * (1 - t)
             latents = latents.to(dtype=self.base_dtype)
         else:
+            logger.info("Using random noise only")
             latents = noise
 
         # Check existence to make it compatible with FlowMatchEulerDiscreteScheduler
         if hasattr(self.scheduler, "init_noise_sigma"):
             # scale the initial noise by the standard deviation required by the scheduler
             latents = latents * self.scheduler.init_noise_sigma
-        return latents, timesteps, i2v_mask, image_cond_latents
+        return latents.to(device), timesteps, i2v_mask, image_cond_latents
 
     # Copied from diffusers.pipelines.latent_consistency_models.pipeline_latent_consistency_text2img.LatentConsistencyModelPipeline.get_guidance_scale_embedding
     def get_guidance_scale_embedding(
@@ -442,6 +453,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         leapfusion_img2vid: Optional[bool] = False,
         image_cond_latents: Optional[torch.Tensor] = None,
         riflex_freq_index: Optional[int] = None,
+        i2v_stability=True,
         **kwargs,
     ):
         r"""
@@ -529,41 +541,41 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         batch_size = 1
         device = self._execution_device
 
-        prompt_embeds = prompt_embed_dict["prompt_embeds"]
-        negative_prompt_embeds = prompt_embed_dict["negative_prompt_embeds"]
-        prompt_mask = prompt_embed_dict["attention_mask"]
-        negative_prompt_mask = prompt_embed_dict["negative_attention_mask"]
-        prompt_embeds_2 = prompt_embed_dict["prompt_embeds_2"]
-        negative_prompt_embeds_2 = prompt_embed_dict["negative_prompt_embeds_2"]
+        prompt_embeds = prompt_embed_dict.get("prompt_embeds", None)
+        negative_prompt_embeds = prompt_embed_dict.get("negative_prompt_embeds", None)
+        #prompt_mask = prompt_embed_dict.get("attention_mask", None)
+        #negative_prompt_mask = prompt_embed_dict.get("negative_attention_mask", None)
+        prompt_embeds_2 = prompt_embed_dict.get("prompt_embeds_2", None)
+        negative_prompt_embeds_2 = prompt_embed_dict.get("negative_prompt_embeds_2", None)
 
         # For classifier free guidance, we need to do two forward passes.
         # Here we concatenate the unconditional and text embeddings into a single batch
         # to avoid doing two forward passes
         if self.do_classifier_free_guidance and not self.do_spatio_temporal_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
-            if prompt_mask is not None:
-                prompt_mask = torch.cat([negative_prompt_mask, prompt_mask])
+            # if prompt_mask is not None:
+            #     prompt_mask = torch.cat([negative_prompt_mask, prompt_mask])
             if prompt_embeds_2 is not None:
                 prompt_embeds_2 = torch.cat([negative_prompt_embeds_2, prompt_embeds_2])
         elif self.do_classifier_free_guidance and self.do_spatio_temporal_guidance:
             prompt_embeds = torch.cat(
                 [negative_prompt_embeds, prompt_embeds, prompt_embeds]
             )
-            if prompt_mask is not None:
-                prompt_mask = torch.cat([negative_prompt_mask, prompt_mask, prompt_mask])
+            # if prompt_mask is not None:
+            #     prompt_mask = torch.cat([negative_prompt_mask, prompt_mask, prompt_mask])
             if prompt_embeds_2 is not None:
                 prompt_embeds_2 = torch.cat(
                     [negative_prompt_embeds_2, prompt_embeds_2, prompt_embeds_2]
                 )
         elif self.do_spatio_temporal_guidance:
             prompt_embeds = torch.cat([prompt_embeds, prompt_embeds])
-            if prompt_mask is not None:
-                prompt_mask = torch.cat([prompt_mask, prompt_mask])
+            # if prompt_mask is not None:
+            #     prompt_mask = torch.cat([prompt_mask, prompt_mask])
             if prompt_embeds_2 is not None:
                 prompt_embeds_2 = torch.cat([prompt_embeds_2, prompt_embeds_2])
 
         prompt_embeds = prompt_embeds.to(device = device, dtype = self.base_dtype)
-        prompt_mask = prompt_mask.to(device)
+        #prompt_mask = prompt_mask.to(device)
         if prompt_embeds_2 is not None:
             prompt_embeds_2 = prompt_embeds_2.to(device = device, dtype = self.base_dtype)
 
@@ -584,11 +596,10 @@ class HunyuanVideoPipeline(DiffusionPipeline):
 
         
         latent_video_length = (video_length - 1) // 4 + 1
-        official_i2v = False
-        if self.transformer.in_channels == 33:
-            official_i2v = True
-            latent_video_length += 1
-        
+        original_image_latents = image_cond_latents
+        i2v_condition_type = self.transformer.i2v_condition_type
+        #if i2v_condition_type == "latent_concat":
+                #latent_video_length += 1
         if feta_args is not None:
             set_enhance_weight(feta_args["weight"])
             feta_start_percent = feta_args["start_percent"]
@@ -650,7 +661,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             freenoise=freenoise,
             context_size=context_frames,
             context_overlap=context_overlap,
-            official_i2v=official_i2v,
+            i2v_condition_type=i2v_condition_type,
+            i2v_stability=i2v_stability,
             image_cond_latents=image_cond_latents,
         )
 
@@ -678,9 +690,12 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 if self.interrupt:
                     continue
 
+                if image_cond_latents is not None and i2v_condition_type == "token_replace":
+                    latents = torch.concat([original_image_latents, latents[:, :, 1:, :, :]], dim=2)
+
                 latent_model_input = latents
                 input_prompt_embeds = prompt_embeds
-                input_prompt_mask = prompt_mask 
+                #input_prompt_mask = prompt_mask 
                 input_prompt_embeds_2 = prompt_embeds_2
                 cfg_enabled = False
                 stg_enabled = False
@@ -697,7 +712,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                         stg_mode = None
                         stg_block_idx = -1
                         input_prompt_embeds = prompt_embeds[0].unsqueeze(0)
-                        input_prompt_mask = prompt_mask[0].unsqueeze(0)
+                        #input_prompt_mask = prompt_mask[0].unsqueeze(0)
                         input_prompt_embeds_2 = prompt_embeds_2[0].unsqueeze(0)
                         latent_model_input = latents
                 else:
@@ -711,7 +726,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                             cfg_enabled = True
                         else:
                             input_prompt_embeds = prompt_embeds[1].unsqueeze(0)
-                            input_prompt_mask = prompt_mask[1].unsqueeze(0)
+                            #input_prompt_mask = prompt_mask[1].unsqueeze(0)
                             input_prompt_embeds_2 = prompt_embeds_2[1].unsqueeze(0)
                 
                 if feta_args is not None:
@@ -725,16 +740,15 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 t_expand = t.repeat(latent_model_input.shape[0])
 
                 if leapfusion_img2vid:
-                    latent_model_input[:, :, [0,], :, :] = original_latents[:, :, [0,], :, :].to(latent_model_input)
+                    latent_model_input[:, :, [0], :, :] = original_latents[:, :, [0], :, :].to(latent_model_input)
 
                 if image_cond_latents is not None and not use_context_schedule:
-                    latent_image_input = (
-                        torch.cat([image_cond_latents] * 2) if cfg_enabled else image_cond_latents
-                    )
-                    if i2v_mask is not None:
-                        i2v_mask = torch.cat([i2v_mask] * 2) if cfg_enabled else i2v_mask
-                        latent_image_input = torch.cat([latent_image_input, i2v_mask], dim=1)
-                    latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=1)
+                    if i2v_condition_type == "latent_concat":
+                        latent_image_input = (torch.cat([image_cond_latents] * 2) if cfg_enabled else image_cond_latents)
+                        if self.transformer.in_channels == 33:
+                            i2v_mask = torch.cat([i2v_mask] * 2) if cfg_enabled else i2v_mask
+                            latent_image_input = torch.cat([latent_image_input, i2v_mask], dim=1)
+                        latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=1)
 
                 if self.transformer.guidance_embed:
                     if cfg_enabled:
@@ -785,7 +799,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 partial_latent_model_input, 
                                 t_expand,
                                 text_states=input_prompt_embeds,
-                                text_mask=input_prompt_mask,
+                                #text_mask=input_prompt_mask,
                                 text_states_2=input_prompt_embeds_2,
                                 freqs_cos=freqs_cos,
                                 freqs_sin=freqs_sin,
@@ -821,7 +835,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 latent_model_input,  # [2, 16, 33, 24, 42]
                                 t_expand,  # [2]
                                 text_states=input_prompt_embeds,  # [2, 256, 4096]
-                                text_mask=input_prompt_mask,  # [2, 256]
+                                #text_mask=input_prompt_mask,  # [2, 256]
                                 text_states_2=input_prompt_embeds_2,  # [2, 768]
                                 freqs_cos=freqs_cos,  # [seqlen, head_dim]
                                 freqs_sin=freqs_sin,  # [seqlen, head_dim]
@@ -835,7 +849,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 latent_model_input[0].unsqueeze(0),
                                 t_expand[0].unsqueeze(0),
                                 text_states=input_prompt_embeds[0].unsqueeze(0), 
-                                text_mask=input_prompt_mask[0].unsqueeze(0), 
+                                #text_mask=input_prompt_mask[0].unsqueeze(0), 
                                 text_states_2=input_prompt_embeds_2[0].unsqueeze(0), 
                                 freqs_cos=freqs_cos,
                                 freqs_sin=freqs_sin,
@@ -848,7 +862,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 latent_model_input[1].unsqueeze(0),
                                 t_expand[1].unsqueeze(0),
                                 text_states=input_prompt_embeds[1].unsqueeze(0), 
-                                text_mask=input_prompt_mask[1].unsqueeze(0), 
+                                #text_mask=input_prompt_mask[1].unsqueeze(0), 
                                 text_states_2=input_prompt_embeds_2[1].unsqueeze(0), 
                                 freqs_cos=freqs_cos,
                                 freqs_sin=freqs_sin,
@@ -884,9 +898,17 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                             )
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(
-                    noise_pred, t, latents, **extra_step_kwargs, return_dict=False
-                )[0]
+                if image_cond_latents is not None and i2v_condition_type == "token_replace":
+                    latents = self.scheduler.step(
+                        noise_pred[:, :, 1:, :, :], t, latents[:, :, 1:, :, :], **extra_step_kwargs, return_dict=False
+                    )[0]
+                    latents = torch.concat(
+                        [original_image_latents, latents], dim=2
+                    )
+                else:
+                    latents = self.scheduler.step(
+                        noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+                    )[0]
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
@@ -907,7 +929,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                     if progress_bar is not None:
                         progress_bar.update()
                     if callback is not None:
-                        if leapfusion_img2vid:
+                        if leapfusion_img2vid or i2v_condition_type == "token_replace":
                             callback_latent = (latent_model_input[:, :, 1:, :, :] - noise_pred[:, :, 1:, :, :] * t / 1000).detach()[0].permute(1,0,2,3)
                         else:
                             callback_latent = (latent_model_input[:, :16, :, :, :] - noise_pred * t / 1000).detach()[0].permute(1,0,2,3)
@@ -920,6 +942,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                     else:
                         comfy_pbar.update(1)
 
-        if leapfusion_img2vid or official_i2v:
-            latents = latents[:, :, 1:, :, :]
+        if image_cond_latents is not None:
+            if leapfusion_img2vid or i2v_condition_type == "latent_concat":
+                latents = latents[:, :, 1:, :, :]
         return latents

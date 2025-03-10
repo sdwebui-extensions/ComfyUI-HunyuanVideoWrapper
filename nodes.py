@@ -219,6 +219,8 @@ class HyVideoTeaCache:
             "required": {
                 "rel_l1_thresh": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01,
                                             "tooltip": "Higher values will make TeaCache more aggressive, faster, but may cause artifacts"}),
+                "cache_device": (["main_device", "offload_device"], {"default": "offload_device", "tooltip": "Device to cache to"}),
+
             },
         }
     RETURN_TYPES = ("TEACACHEARGS",)
@@ -227,9 +229,14 @@ class HyVideoTeaCache:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "TeaCache settings for HunyuanVideo to speed up inference"
 
-    def process(self, rel_l1_thresh):
+    def process(self, rel_l1_thresh, cache_device):
+        if cache_device == "main_device":
+            teacache_device = mm.get_torch_device()
+        else:
+            teacache_device = mm.unet_offload_device()
         teacache_args = {
             "rel_l1_thresh": rel_l1_thresh,
+            "cache_device": teacache_device
         }
         return (teacache_args,)
 
@@ -276,8 +283,8 @@ class HyVideoModelLoader:
                 "attention_mode": ([
                     "sdpa",
                     "flash_attn_varlen",
-                    "sageattn_varlen",
                     "sageattn",
+                    "sageattn_varlen",
                     "comfy",
                     ], {"default": "flash_attn"}),
                 "compile_args": ("COMPILEARGS", ),
@@ -296,7 +303,7 @@ class HyVideoModelLoader:
     def loadmodel(self, model, base_precision, load_device,  quantization,
                   compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, auto_cpu_offload=False, upcast_rope=True):
         transformer = None
-        #mm.unload_all_models()
+        mm.unload_all_models()
         mm.soft_empty_cache()
         manual_offloading = True
         if "sage" in attention_mode:
@@ -316,6 +323,12 @@ class HyVideoModelLoader:
         sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
 
         in_channels = sd["img_in.proj.weight"].shape[1]
+        if in_channels == 16 and "i2v" in model.lower():
+            i2v_condition_type = "token_replace"
+        else:
+            i2v_condition_type = "latent_concat"
+        log.info(f"Condition type: {i2v_condition_type}")
+
         guidance_embed = sd.get("guidance_in.mlp.0.weight", False) is not False
 
         out_channels = 16
@@ -328,6 +341,7 @@ class HyVideoModelLoader:
             "heads_num": 24,
             "mlp_width_ratio": 4,
             "guidance_embed": guidance_embed,
+            "i2v_condition_type": i2v_condition_type,
         }
         with init_empty_weights():
             transformer = HYVideoDiffusionTransformer(
@@ -350,7 +364,7 @@ class HyVideoModelLoader:
         )        
         
         scheduler_config = {
-            "flow_shift": 9.0,
+            "flow_shift": 7.0,
             "reverse": True,
             "solver": "euler",
             "use_flow_sigmas": True, 
@@ -398,9 +412,24 @@ class HyVideoModelLoader:
                     lora_sd = standardize_lora_key_format(lora_sd)
                     if l["blocks"]:
                         lora_sd = filter_state_dict_by_blocks(lora_sd, l["blocks"])
+                    
+                    # patch in channels for keyframe LoRA
+                    if "diffusion_model.img_in.proj.lora_A.weight" in lora_sd:
+                        from .hyvideo.modules.embed_layers import PatchEmbed
+                        if lora_sd["diffusion_model.img_in.proj.lora_A.weight"].shape[1] != in_channels:
+                            log.info(f"Different in_channels {lora_sd['diffusion_model.img_in.proj.lora_A.weight'].shape[1]} vs {in_channels}, patching...")
+                            new_img_in = PatchEmbed(
+                                patch_size=patcher.model.diffusion_model.patch_size,
+                                in_chans=32,
+                                embed_dim=patcher.model.diffusion_model.hidden_size,
+                            ).to(patcher.model.diffusion_model.device, dtype=patcher.model.diffusion_model.dtype)
+                            new_img_in.proj.weight.zero_()
+                            new_img_in.proj.weight[:, :in_channels].copy_(patcher.model.diffusion_model.img_in.proj.weight)
 
-                    #for k in lora_sd.keys():
-                    #   print(k)
+                            if patcher.model.diffusion_model.img_in.proj.bias is not None:
+                                new_img_in.proj.bias.copy_(patcher.model.diffusion_model.img_in.proj.bias)
+
+                            patcher.model.diffusion_model.img_in = new_img_in
 
                     patcher, _ = load_lora_for_models(patcher, None, lora_sd, lora_strength, 0)
 
@@ -626,6 +655,46 @@ class HyVideoTorchCompileSettings:
         return (compile_args, )
 
 #region TextEncode
+    
+class HyVideoTextEmbedBridge:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "positive": ("CONDITIONING", ),
+            },
+            "optional": {
+                "negative": ("CONDITIONING", ),
+                "hyvid_cfg": ("HYVID_CFG", {"tooltip": "The prompt from the cfg node is not used, only the settings"}),
+            }
+        }
+    RETURN_TYPES = ("HYVIDEMBEDS",)
+    RETURN_NAMES = ("hyvid_embeds",)
+    FUNCTION = "convert"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "Acts as a bridge between the native ComfyUI conditioning and the HunyuanVideoWrapper embeds"
+
+    def convert(self, positive, negative=None, hyvid_cfg=None): 
+        positive_cond = positive[0][0]
+        positive_pooled = positive[0][1]["pooled_output"]
+        positive_attention_mask = torch.ones(positive_cond.shape[1], dtype=torch.bool, device=positive_cond.device).unsqueeze(0)
+        negative_cond, negative_attention_mask, negative_pooled = None, None, None
+        if negative is not None:
+            negative_cond = negative[0][0]
+            negative_pooled = negative[0][1]["pooled_output"]
+            negative_attention_mask = torch.ones(negative_cond.shape[1], dtype=torch.bool, device=negative_cond.device).unsqueeze(0)
+        prompt_embeds_dict = {
+                "prompt_embeds": positive_cond,
+                "negative_prompt_embeds": negative_cond,
+                "attention_mask": positive_attention_mask,
+                "negative_attention_mask": negative_attention_mask,
+                "prompt_embeds_2": positive_pooled,
+                "negative_prompt_embeds_2": negative_pooled,
+                "cfg": torch.tensor(hyvid_cfg["cfg"]) if hyvid_cfg is not None else None,
+                "start_percent": torch.tensor(hyvid_cfg["start_percent"]) if hyvid_cfg is not None else None,
+                "end_percent": torch.tensor(hyvid_cfg["end_percent"]) if hyvid_cfg is not None else None,
+                "batched_cfg": torch.tensor(hyvid_cfg["batched_cfg"]) if hyvid_cfg is not None else None,
+            }
+        return (prompt_embeds_dict,)
 
 class DownloadAndLoadHyVideoTextEncoder:
     @classmethod
@@ -673,7 +742,7 @@ class DownloadAndLoadHyVideoTextEncoder:
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.bfloat16
-            )
+           )
             
         if clip_model != "disabled":
             clip_model_path = os.path.join(folder_paths.models_dir, "clip", "clip-vit-large-patch14")
@@ -796,7 +865,8 @@ class HyVideoTextEncode:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image=None, image1=None, image2=None, clip_text_override=None):
+    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", 
+                hyvid_cfg=None, image=None, image1=None, image2=None, clip_text_override=None, image_embed_interleave=2):
         if clip_text_override is not None and len(clip_text_override) == 0:
             clip_text_override = None
         device = mm.text_encoder_device()
@@ -839,7 +909,7 @@ class HyVideoTextEncode:
         else:
             prompt_template_dict = None
 
-        def encode_prompt(self, prompt, negative_prompt, text_encoder, image_token_selection_expr="::4", image1=None, image2=None, clip_text_override=None):
+        def encode_prompt(self, prompt, negative_prompt, text_encoder, image_token_selection_expr="::4", semantic_images=None, image1=None, image2=None, clip_text_override=None, image_embed_interleave=2):
             batch_size = 1
             num_videos_per_prompt = 1
 
@@ -852,9 +922,10 @@ class HyVideoTextEncode:
                 prompt_outputs = text_encoder.encode(text_inputs, 
                                                     prompt_template=prompt_template_dict, 
                                                     image_token_selection_expr=image_token_selection_expr,
-                                                    semantic_images = [image.squeeze(0) * 255] if text_encoder.text_encoder_type == "vlm" else None,
+                                                    semantic_images = [semantic_images.squeeze(0) * 255] if text_encoder.text_encoder_type == "vlm" else None,
+                                                    image_embed_interleave=image_embed_interleave,
                                                     device=device,
-                                                    data_type=prompt_template
+                                                    data_type=prompt_template,
                                                     )
             else:
                 text_inputs = text_encoder.text2tokens(prompt, 
@@ -906,10 +977,21 @@ class HyVideoTextEncode:
 
                 # max_length = prompt_embeds.shape[1]
                 uncond_input = text_encoder.text2tokens(uncond_tokens, prompt_template=prompt_template_dict)
+                uncond_image = None
+                if image is not None:
+                    if text_encoder.text_encoder_type == "vlm":
+                        uncond_image = torch.zeros_like(semantic_images.squeeze(0))
 
                 negative_prompt_outputs = text_encoder.encode(
-                    uncond_input, prompt_template=prompt_template_dict, device=device
+                    uncond_input, 
+                    prompt_template=prompt_template_dict, 
+                    device=device,
+                    image_token_selection_expr=image_token_selection_expr,
+                    semantic_images = [uncond_image] if text_encoder.text_encoder_type == "vlm" else None,
+                    image_embed_interleave=image_embed_interleave,
+                    data_type=prompt_template,
                 )
+                
                 negative_prompt_embeds = negative_prompt_outputs.hidden_state
 
                 negative_attention_mask = negative_prompt_outputs.attention_mask
@@ -940,7 +1022,9 @@ class HyVideoTextEncode:
                                                                                                             text_encoder_1, 
                                                                                                             image_token_selection_expr=image_token_selection_expr,
                                                                                                             image1=image1,
-                                                                                                            image2=image2)
+                                                                                                            image2=image2,
+                                                                                                            semantic_images=image,
+                                                                                                            image_embed_interleave=image_embed_interleave,)
         if force_offload:
             text_encoder_1.to(offload_device)
             mm.soft_empty_cache()
@@ -974,15 +1058,21 @@ class HyVideoTextEncode:
             attention_mask_2 = None
             negative_attention_mask_2 = None
 
+        last_token = (attention_mask != 0).sum(dim=1).max().item()
+        prompt_embeds = prompt_embeds[:, :last_token, :]
+        if negative_prompt_embeds is not None:
+            last_token = (negative_attention_mask != 0).sum(dim=1).max().item()
+            negative_prompt_embeds = negative_prompt_embeds[:, :last_token, :]
+
         prompt_embeds_dict = {
                 "prompt_embeds": prompt_embeds,
                 "negative_prompt_embeds": negative_prompt_embeds,
-                "attention_mask": attention_mask,
-                "negative_attention_mask": negative_attention_mask,
+                #"attention_mask": attention_mask,
+                #"negative_attention_mask": negative_attention_mask,
                 "prompt_embeds_2": prompt_embeds_2,
                 "negative_prompt_embeds_2": negative_prompt_embeds_2,
-                "attention_mask_2": attention_mask_2,
-                "negative_attention_mask_2": negative_attention_mask_2,
+                #"attention_mask_2": attention_mask_2,
+                #"negative_attention_mask_2": negative_attention_mask_2,
                 "cfg": torch.tensor(hyvid_cfg["cfg"]) if hyvid_cfg is not None else None,
                 "start_percent": torch.tensor(hyvid_cfg["start_percent"]) if hyvid_cfg is not None else None,
                 "end_percent": torch.tensor(hyvid_cfg["end_percent"]) if hyvid_cfg is not None else None,
@@ -1029,6 +1119,7 @@ class HyVideoI2VEncode(HyVideoTextEncode):
                 "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
                 "image": ("IMAGE", {"default": None}),
                 "hyvid_cfg": ("HYVID_CFG", ),
+                "image_embed_interleave": ("INT", {"default": 2}),
             }
         }
 
@@ -1204,6 +1295,7 @@ class HyVideoSampler:
                         "default": 'FlowMatchDiscreteScheduler'
                     }),
                 "riflex_freq_index": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Frequency index for RIFLEX, disabled when 0, default 4. Allows for new frames to be generated after 129 without looping"}),
+                "i2v_mode": (["stability", "dynamic"], {"default": "dynamic", "tooltip": "I2V mode for image2video process"}),
             }
         }
 
@@ -1214,13 +1306,16 @@ class HyVideoSampler:
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
                 samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, 
-                teacache_args=None, scheduler=None, image_cond_latents=None, riflex_freq_index=0):
+                teacache_args=None, scheduler=None, image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability"):
         model = model.model
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         dtype = model["dtype"]
         transformer = model["pipe"].transformer
+
+        if isinstance(riflex_freq_index, str):
+            riflex_freq_index = 0
 
         #handle STG
         if stg_args is not None:
@@ -1243,6 +1338,10 @@ class HyVideoSampler:
         if embedded_guidance_scale == 0.0:
             embedded_guidance_scale = None
 
+        i2v_stability = False
+        if i2v_mode == "stability":
+            i2v_stability = True
+     
         generator = torch.Generator(device=torch.device("cpu")).manual_seed(seed)
 
         if width <= 0 or height <= 0 or num_frames <= 0:
@@ -1302,11 +1401,13 @@ class HyVideoSampler:
                     transformer.last_frame_count != num_frames):
                 # Reset TeaCache state on dimension change
                 transformer.cnt = 0
+                transformer.teacache_skipped_steps = 0
                 transformer.accumulated_rel_l1_distance = 0
                 transformer.previous_modulated_input = None
                 transformer.previous_residual = None
                 transformer.last_dimensions = (height, width, num_frames)
                 transformer.last_frame_count = num_frames
+                transformer.teacache_device = device
 
             transformer.enable_teacache = True
             transformer.num_steps = steps
@@ -1314,6 +1415,7 @@ class HyVideoSampler:
         else:
             transformer.enable_teacache = False
 
+        mm.unload_all_models()
         mm.soft_empty_cache()
         gc.collect()
 
@@ -1356,7 +1458,8 @@ class HyVideoSampler:
             feta_args=feta_args,
             leapfusion_img2vid = leapfusion_img2vid,
             image_cond_latents = image_cond_latents["samples"] * VAE_SCALING_FACTOR if image_cond_latents is not None else None,
-            riflex_freq_index = riflex_freq_index
+            riflex_freq_index = riflex_freq_index,
+            i2v_stability = i2v_stability,
         )
 
         print_memory(device)
@@ -1367,6 +1470,7 @@ class HyVideoSampler:
 
         if teacache_args is not None:
             log.info(f"TeaCache skipped {transformer.teacache_skipped_steps} steps")
+            transformer.teacache_skipped_steps = 0
 
         if force_offload:
             if model["manual_offloading"]:
@@ -1390,14 +1494,19 @@ class HyVideoDecode:
                     "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
                     "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
                     },
+                
+                "optional": {
+                    "skip_latents": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Number of latents to skip from the start, can help with flashing"}),
+                    "balance_brightness": ("BOOLEAN", {"default": False, "tooltip": "Attempt to balance brightness of the output frames"}),
                 }
+            }
 
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("images",)
     FUNCTION = "decode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def decode(self, vae, samples, enable_vae_tiling, temporal_tiling_sample_size, spatial_tile_sample_min_size, auto_tile_size):
+    def decode(self, vae, samples, enable_vae_tiling, temporal_tiling_sample_size, spatial_tile_sample_min_size, auto_tile_size, skip_latents=0, balance_brightness=False):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         mm.soft_empty_cache()
@@ -1433,6 +1542,9 @@ class HyVideoDecode:
         #latents = latents / vae.config.scaling_factor
         latents = latents.to(vae.dtype).to(device)
 
+        if skip_latents > 0:
+            latents = latents[:, :, skip_latents:]
+
         if enable_vae_tiling:
             vae.enable_tiling()
             video = vae.decode(
@@ -1455,6 +1567,23 @@ class HyVideoDecode:
 
             video = video_processor.postprocess_video(video=video, output_type="pt")
             out = video[0].permute(0, 2, 3, 1).cpu().float()
+            # Balance all frames
+            if balance_brightness:
+                if out.shape[0] > 1:  # Multiple frames
+                    # Calculate target brightness (median of frame means)
+                    frame_means = torch.tensor([frame.mean().item() for frame in out])
+                    target_brightness = frame_means.median()
+                    
+                    # Scale each frame to target brightness
+                    for i in range(len(out)):
+                        current_mean = out[i].mean().item()
+                        if current_mean != 0:  # Avoid division by zero
+                            scale_factor = target_brightness / current_mean
+                            # Optional: limit scaling range
+                            scale_factor = max(min(scale_factor, 1.4), 0.5)
+                            out[i] = out[i] * scale_factor
+            log.info(f"VAE decode output min max {out.min()} {out.max()}")
+            out = out.clamp(0, 1)
         else:
             out = (video / 2 + 0.5).clamp(0, 1)
             out = out.permute(0, 2, 3, 1).cpu().float()
@@ -1462,6 +1591,79 @@ class HyVideoDecode:
         return (out,)
 
 #region VideoEncode
+class HyVideoEncodeKeyframes:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "vae": ("VAE",),
+                    "start_image": ("IMAGE",),
+                    "end_image": ("IMAGE", {"default": None, "tooltip": "End frame for dashtoon keyframe LoRA"}),
+                    "num_frames": ("INT", {"default": 49, "min": 1, "max": 1024, "step": 4}),
+                    "enable_vae_tiling": ("BOOLEAN", {"default": True, "tooltip": "Drastically reduces memory use but may introduce seams"}),
+                    "temporal_tiling_sample_size": ("INT", {"default": 64, "min": 4, "max": 256, "tooltip": "Smaller values use less VRAM, model default is 64, any other value will cause stutter"}),
+                    "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
+                    "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
+                    },
+                    "optional": {
+                        "noise_aug_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Strength of noise augmentation, helpful for leapfusion I2V where some noise can add motion and give sharper results"}),
+                        "latent_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Additional latent multiplier, helpful for leapfusion I2V where lower values allow for more motion"}),
+                        "latent_dist": (["sample", "mode"], {"default": "sample", "tooltip": "Sampling mode for the VAE, sample uses the latent distribution, mode uses the mode of the latent distribution"}),
+                    }
+                }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("samples",)
+    FUNCTION = "encode"
+    CATEGORY = "HunyuanVideoWrapper"
+
+    def encode(self, vae, start_image, end_image, num_frames, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, 
+               spatial_tile_sample_min_size, noise_aug_strength=0.0, latent_strength=1.0, latent_dist="sample"):
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+
+        generator = torch.Generator(device=torch.device("cpu"))#.manual_seed(seed)
+        vae.to(device)
+        if not auto_tile_size:
+            vae.tile_latent_min_tsize = temporal_tiling_sample_size // 4
+            vae.tile_sample_min_size = spatial_tile_sample_min_size
+            vae.tile_latent_min_size = spatial_tile_sample_min_size // 8
+            if temporal_tiling_sample_size != 64:
+                vae.t_tile_overlap_factor = 0.0
+            else:
+                vae.t_tile_overlap_factor = 0.25
+        else:
+            #defaults
+            vae.tile_latent_min_tsize = 16
+            vae.tile_sample_min_size = 256
+            vae.tile_latent_min_size = 32
+
+        image_1 = (start_image.clone()).to(vae.dtype).to(device).unsqueeze(0).permute(0, 4, 1, 2, 3) # B, C, T, H, W
+        image_2 = (end_image.clone()).to(vae.dtype).to(device).unsqueeze(0).permute(0, 4, 1, 2, 3) # B, C, T, H, W
+        if noise_aug_strength > 0.0:
+            image_1 = add_noise_to_reference_video(image_1, ratio=noise_aug_strength)
+            image_2 = add_noise_to_reference_video(image_2, ratio=noise_aug_strength)
+
+        # latent_video_length = (num_frames - 1) // 4 + 1
+        # print(image_1.shape, image_2.shape, latent_video_length)
+        
+        video_frames = torch.zeros(1, image_1.shape[1], num_frames-2, image_1.shape[3], image_1.shape[4], device=image_1.device, dtype=image_1.dtype)
+        print("video_frames", video_frames.shape)
+        video_frames = torch.cat([image_1, video_frames, image_2], dim=2) * 2.0 - 1.0
+        
+        if enable_vae_tiling:
+            vae.enable_tiling()
+        if latent_dist == "sample":
+            latents = vae.encode(video_frames).latent_dist.sample(generator)
+        elif latent_dist == "mode":
+            latents = vae.encode(video_frames).latent_dist.mode()
+        if latent_strength != 1.0:
+            latents *= latent_strength
+        #latents = latents * vae.config.scaling_factor
+        vae.to(offload_device)
+        log.info(f"encoded latents shape {latents.shape}")
+
+        return ({"samples": latents},)
+    
 class HyVideoEncode:
     @classmethod
     def INPUT_TYPES(s):
@@ -1476,6 +1678,7 @@ class HyVideoEncode:
                     "optional": {
                         "noise_aug_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Strength of noise augmentation, helpful for leapfusion I2V where some noise can add motion and give sharper results"}),
                         "latent_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Additional latent multiplier, helpful for leapfusion I2V where lower values allow for more motion"}),
+                        "latent_dist": (["sample", "mode"], {"default": "sample", "tooltip": "Sampling mode for the VAE, sample uses the latent distribution, mode uses the mode of the latent distribution"}),
                     }
                 }
 
@@ -1484,7 +1687,8 @@ class HyVideoEncode:
     FUNCTION = "encode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, spatial_tile_sample_min_size, noise_aug_strength=0.0, latent_strength=1.0):
+    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, 
+               spatial_tile_sample_min_size, noise_aug_strength=0.0, latent_strength=1.0, latent_dist="sample"):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
@@ -1510,12 +1714,15 @@ class HyVideoEncode:
         
         if enable_vae_tiling:
             vae.enable_tiling()
-        latents = vae.encode(image).latent_dist.sample(generator)
+        if latent_dist == "sample":
+            latents = vae.encode(image).latent_dist.sample(generator)
+        elif latent_dist == "mode":
+            latents = vae.encode(image).latent_dist.mode()
         if latent_strength != 1.0:
             latents *= latent_strength
         #latents = latents * vae.config.scaling_factor
         vae.to(offload_device)
-        print("encoded latents shape",latents.shape)
+        log.info(f"encoded latents shape {latents.shape}")
 
 
         return ({"samples": latents},)
@@ -1667,7 +1874,9 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoEnhanceAVideo": HyVideoEnhanceAVideo,
     "HyVideoTeaCache": HyVideoTeaCache,
     "HyVideoGetClosestBucketSize": HyVideoGetClosestBucketSize,
-    "HyVideoI2VEncode": HyVideoI2VEncode
+    "HyVideoI2VEncode": HyVideoI2VEncode,
+    "HyVideoEncodeKeyframes": HyVideoEncodeKeyframes,
+    "HyVideoTextEmbedBridge": HyVideoTextEmbedBridge,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1692,5 +1901,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoEnhanceAVideo": "HunyuanVideo Enhance A Video",
     "HyVideoTeaCache": "HunyuanVideo TeaCache",
     "HyVideoGetClosestBucketSize": "HunyuanVideo Get Closest Bucket Size",
-    "HyVideoI2VEncode": "HyVideo I2V Encode"
+    "HyVideoI2VEncode": "HyVideo I2V Encode",
+    "HyVideoEncodeKeyframes": "HyVideo Encode Keyframes",
+    "HyVideoTextEmbedBridge": "HyVideo TextEmbed Bridge",
     }

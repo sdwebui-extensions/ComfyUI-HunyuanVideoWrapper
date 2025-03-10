@@ -410,28 +410,22 @@ class TextEncoder(nn.Module):
             else:
                 last_hidden_state = outputs[self.output_key]
             if prompt_template is not None:
-                if data_type == 'I2V_image':
-                    crop_start = prompt_template.get("crop_start", -1)
-                    crop_end = prompt_template.get('assistant_emb_start', -1)
-                elif data_type == 'I2V_video':
-                    crop_start = prompt_template.get("crop_start", -1)
-                    text_crop_start = crop_start - 1 + prompt_template.get("image_emb_len", 576)
-                    image_crop_start = prompt_template.get("image_emb_start", 5)
-                    image_crop_end = prompt_template.get('image_emb_end', 581)
-                    batch_indices, last_double_return_token_indices = torch.where(
-                        batch_encoding["input_ids"] == prompt_template.get('double_return_token_id', 271))
-                    last_double_return_token_indices = last_double_return_token_indices.reshape(
-                        batch_encoding["input_ids"].shape[0], -1)[:, -1]
-                    batch_indices = batch_indices.reshape(batch_encoding["input_ids"].shape[0], -1)[:, -1]
-                    assistant_crop_start = last_double_return_token_indices - 1 + prompt_template.get(
-                        "image_emb_len", 576) - 4
-                    assistant_crop_end = last_double_return_token_indices - 1 + prompt_template.get(
-                        "image_emb_len", 576)
+                crop_start = prompt_template.get("crop_start", -1)
+                text_crop_start = crop_start - 1 + prompt_template.get("image_emb_len", 576)
+                image_crop_start = prompt_template.get("image_emb_start", 5)
+                image_crop_end = prompt_template.get('image_emb_end', 581)
+                batch_indices, last_double_return_token_indices = torch.where(
+                    batch_encoding["input_ids"] == prompt_template.get('double_return_token_id', 271))
+                last_double_return_token_indices = last_double_return_token_indices.reshape(
+                    batch_encoding["input_ids"].shape[0], -1)[:, -1]
+                batch_indices = batch_indices.reshape(batch_encoding["input_ids"].shape[0], -1)[:, -1]
+                assistant_crop_start = last_double_return_token_indices - 1 + prompt_template.get(
+                    "image_emb_len", 576) - 4
+                assistant_crop_end = last_double_return_token_indices - 1 + prompt_template.get(
+                    "image_emb_len", 576)
 
-                    attention_mask_assistant_crop_start = last_double_return_token_indices - 4
-                    attention_mask_assistant_crop_end = last_double_return_token_indices
-                else:
-                    raise ValueError(f"Unsupported data type: {data_type}")
+                attention_mask_assistant_crop_start = last_double_return_token_indices - 4
+                attention_mask_assistant_crop_end = last_double_return_token_indices
 
                 text_last_hidden_state = []
                 text_attention_mask = []
@@ -455,6 +449,8 @@ class TextEncoder(nn.Module):
                 image_last_hidden_state = torch.stack(image_last_hidden_state)
                 image_attention_mask = torch.stack(image_attention_mask)
 
+                print("image_embed_interleave", image_embed_interleave)
+
                 if semantic_images is not None and 0 < image_embed_interleave < 6:
                     image_last_hidden_state = image_last_hidden_state[:, ::image_embed_interleave, :]
                     image_attention_mask = image_attention_mask[:, ::image_embed_interleave]
@@ -477,6 +473,7 @@ class TextEncoder(nn.Module):
         do_sample=False,
         hidden_state_skip_layer=None,
         return_texts=False,
+        image_embed_interleave=2,
     ):
         batch_encoding = self.text2tokens(text)
         return self.encode(
@@ -486,6 +483,7 @@ class TextEncoder(nn.Module):
             do_sample=do_sample,
             hidden_state_skip_layer=hidden_state_skip_layer,
             return_texts=return_texts,
+            image_embed_interleave=image_embed_interleave
         )
 
 xtuner_config={
