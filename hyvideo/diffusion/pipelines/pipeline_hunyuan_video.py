@@ -548,6 +548,14 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         prompt_embeds_2 = prompt_embed_dict.get("prompt_embeds_2", None)
         negative_prompt_embeds_2 = prompt_embed_dict.get("negative_prompt_embeds_2", None)
 
+        # Handle primary embeds
+        if prompt_embeds is not None and negative_prompt_embeds is not None:
+            max_length = max(prompt_embeds.shape[1], negative_prompt_embeds.shape[1])
+            if prompt_embeds.shape[1] < max_length:
+                prompt_embeds = torch.nn.functional.pad(prompt_embeds, (0, 0, 0, max_length - prompt_embeds.shape[1]))
+            if negative_prompt_embeds.shape[1] < max_length:
+                negative_prompt_embeds = torch.nn.functional.pad(negative_prompt_embeds, (0, 0, 0, max_length - negative_prompt_embeds.shape[1]))
+
         # For classifier free guidance, we need to do two forward passes.
         # Here we concatenate the unconditional and text embeddings into a single batch
         # to avoid doing two forward passes
