@@ -1,5 +1,26 @@
 # ComfyUI wrapper nodes for [HunyuanVideo](https://github.com/Tencent/HunyuanVideo)
+
+# Update 5
+
+So I know I said I'd stop working on this, but with all the new stuff out I wanted to work on those and have included the official I2V, it's "fixed" version 2 and the [LoRAs](https://huggingface.co/Kijai/HunyuanVideo_comfy/blob/main/hyvid_I2V_lora_embrace.safetensors) they included in the release
+
+https://github.com/user-attachments/assets/8ce4b1ee-fb63-49a2-83b4-ba8ef1a8b842
+
+
+
+
+and the [dashtoon keyframe LoRA](https://github.com/dashtoon/hunyuan-video-keyframe-control-lora).
+
+https://github.com/user-attachments/assets/2b6e32e4-470f-4feb-b299-5a453e2b4fa1
+
+Also because there's been so much trouble in using the transformer model for text encoding, I figured a way to use the text embeds from native ComfyUI text encoding, like this:
+
+![image](https://github.com/user-attachments/assets/80b23087-a66d-4937-bb2c-d15d5a20304b)
+
+Not that it does give somewhat different results and using these nodes like that can't be considered as original implementation wrapper anymore.
+
 # Update 4, the non-update:
+
 
 As the native implementation exists, and has support for most features by now, I will mostly stop working on these nodes for anything but it's main purpose: early access and testing of potential new features that are difficult (at least for me) to implement natively.
 
