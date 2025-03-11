@@ -852,6 +852,7 @@ class HyVideoTextEncode:
                 "custom_prompt_template": ("PROMPT_TEMPLATE", {"default": PROMPT_TEMPLATE["dit-llm-encode-video"], "multiline": True}),
                 "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
                 "hyvid_cfg": ("HYVID_CFG", ),
+                "model_to_offload": ("HYVIDEOMODEL", {"tooltip": "If connected, moves the video model to the offload device"}),
             }
         }
 
@@ -861,11 +862,15 @@ class HyVideoTextEncode:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", 
-                hyvid_cfg=None, image=None, image1=None, image2=None, clip_text_override=None, image_embed_interleave=2):
+                hyvid_cfg=None, image=None, image1=None, image2=None, clip_text_override=None, image_embed_interleave=2, model_to_offload=None):
         if clip_text_override is not None and len(clip_text_override) == 0:
             clip_text_override = None
         device = mm.text_encoder_device()
         offload_device = mm.text_encoder_offload_device()
+
+        if model_to_offload is not None:
+            log.info(f"Moving video model to {offload_device}...")
+            model_to_offload.model.to(offload_device)
 
         text_encoder_1 = text_encoders["text_encoder"]
         if clip_l is None:
@@ -1093,6 +1098,7 @@ class HyVideoTextImageEncode(HyVideoTextEncode):
                 "image2": ("IMAGE", {"default": None}),
                 "clip_text_override": ("STRING", {"default": "", "multiline": True} ),
                 "hyvid_cfg": ("HYVID_CFG", ),
+                "model_to_offload": ("WANVIDEOMODEL", {"tooltip": "Model to move to offload_device before encoding"}),
             }
         }
 
@@ -1115,6 +1121,7 @@ class HyVideoI2VEncode(HyVideoTextEncode):
                 "image": ("IMAGE", {"default": None}),
                 "hyvid_cfg": ("HYVID_CFG", ),
                 "image_embed_interleave": ("INT", {"default": 2}),
+                "model_to_offload": ("WANVIDEOMODEL", {"tooltip": "Model to move to offload_device before encoding"}),
             }
         }
 
