@@ -1098,7 +1098,7 @@ class HyVideoTextImageEncode(HyVideoTextEncode):
                 "image2": ("IMAGE", {"default": None}),
                 "clip_text_override": ("STRING", {"default": "", "multiline": True} ),
                 "hyvid_cfg": ("HYVID_CFG", ),
-                "model_to_offload": ("WANVIDEOMODEL", {"tooltip": "Model to move to offload_device before encoding"}),
+                "model_to_offload": ("HYVIDEOMODEL", {"tooltip": "Model to move to offload_device before encoding"}),
             }
         }
 
@@ -1121,7 +1121,7 @@ class HyVideoI2VEncode(HyVideoTextEncode):
                 "image": ("IMAGE", {"default": None}),
                 "hyvid_cfg": ("HYVID_CFG", ),
                 "image_embed_interleave": ("INT", {"default": 2}),
-                "model_to_offload": ("WANVIDEOMODEL", {"tooltip": "Model to move to offload_device before encoding"}),
+                "model_to_offload": ("HYVIDEOMODEL", {"tooltip": "Model to move to offload_device before encoding"}),
             }
         }
 
