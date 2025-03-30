@@ -1901,6 +1901,7 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoI2VEncode": HyVideoI2VEncode,
     "HyVideoEncodeKeyframes": HyVideoEncodeKeyframes,
     "HyVideoTextEmbedBridge": HyVideoTextEmbedBridge,
+    "HyVideoLoopArgs": HyVideoLoopArgs,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1928,4 +1929,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoI2VEncode": "HyVideo I2V Encode",
     "HyVideoEncodeKeyframes": "HyVideo Encode Keyframes",
     "HyVideoTextEmbedBridge": "HyVideo TextEmbed Bridge",
+    "HyVideoLoopArgs": "HyVideo Loop Args",
     }
