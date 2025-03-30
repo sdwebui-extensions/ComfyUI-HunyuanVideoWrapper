@@ -454,6 +454,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         image_cond_latents: Optional[torch.Tensor] = None,
         riflex_freq_index: Optional[int] = None,
         i2v_stability=True,
+        loop_args: Optional[Dict] = None,
         **kwargs,
     ):
         r"""
@@ -689,6 +690,15 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         callback = prepare_callback(self.comfy_model, num_inference_steps)
 
         #print(self.scheduler.sigmas)
+
+        latent_shift_loop = False
+        if loop_args is not None:
+            latent_shift_loop = True
+            is_looped = True
+            latent_skip = loop_args["shift_skip"]
+            latent_shift_start_percent = loop_args["start_percent"]
+            latent_shift_end_percent = loop_args["end_percent"]
+            shift_idx = 0
         
         logger.info(f"Sampling {video_length} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")
     
@@ -698,9 +708,11 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 if self.interrupt:
                     continue
 
+                current_step_percentage = i / len(timesteps)
+
                 if image_cond_latents is not None and i2v_condition_type == "token_replace":
                     latents = torch.concat([original_image_latents, latents[:, :, 1:, :, :]], dim=2)
-
+                    
                 latent_model_input = latents
                 input_prompt_embeds = prompt_embeds
                 #input_prompt_mask = prompt_mask 
@@ -708,7 +720,12 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 cfg_enabled = False
                 stg_enabled = False
 
-                current_step_percentage = i / len(timesteps)
+                ### latent shift
+                if latent_shift_loop:
+                    if latent_shift_start_percent <= current_step_percentage <= latent_shift_end_percent:
+                        latent_model_input = torch.cat([latent_model_input[:, :, shift_idx:]] + [latent_model_input[:, :, :shift_idx]], dim=2)
+
+                
                 if self.do_spatio_temporal_guidance:
                     if stg_start_percent <= current_step_percentage <= stg_end_percent:
                         stg_enabled = True
@@ -904,6 +921,11 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                             noise_pred = noise_pred_text + self._stg_scale * (
                                 noise_pred_text - noise_pred_perturb
                             )
+                        if latent_shift_loop:
+                            #reverse latent shift
+                            if latent_shift_start_percent <= current_step_percentage <= latent_shift_end_percent:
+                                noise_pred = torch.cat([noise_pred[:, :, latent_video_length - shift_idx:]] + [noise_pred[:, :, :latent_video_length - shift_idx]], dim=2)
+                                shift_idx = (shift_idx + latent_skip) % latent_video_length
 
                 # compute the previous noisy sample x_t -> x_t-1
                 if image_cond_latents is not None and i2v_condition_type == "token_replace":
