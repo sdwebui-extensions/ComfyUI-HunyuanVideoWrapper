@@ -45,7 +45,7 @@
         "Node name for S&R": "TextEncodeHunyuanVideo_ImageToVideo"
       },
       "widgets_values": [
-        "Aerial view, aerial view, overexposed, low quality, deformation, a poor composition, bad hands, bad teeth, bad eyes, bad limbs, distortion",
+        "Aerial view, aerial view, overexposed, low quality, deformation, a poor composition, bad hands, bad teeth, bad eyes, bad limbs, distortion, blurring, text, subtitles, static, picture, black border.",
         2
       ],
       "color": "#322",
@@ -812,7 +812,7 @@
         "Node name for S&R": "TextEncodeHunyuanVideo_ImageToVideo"
       },
       "widgets_values": [
-        "A woman is boxing with a panda, and they are at a stalemate.",
+        "Realistic, High-quality. A woman is boxing with a panda, and they are at a stalemate.",
         2
       ],
       "color": "#232",
