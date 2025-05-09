@@ -1257,9 +1257,9 @@ class HunyuanVideoSLG:
     def INPUT_TYPES(s):
         return {"required": {
             "double_blocks": ("STRING", {"default": "", "tooltip": "Blocks to skip uncond on, separated by comma, index starts from 0"}),
-            "single_blocks": ("STRING", {"default": "10", "tooltip": "Blocks to skip uncond on, separated by comma, index starts from 0"}),
-            "start_percent": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percent of SLG signal"}),
-            "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percent of SLG signal"}),
+            "single_blocks": ("STRING", {"default": "20", "tooltip": "Blocks to skip uncond on, separated by comma, index starts from 0"}),
+            "start_percent": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percent of SLG signal"}),
+            "end_percent": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percent of SLG signal"}),
             },
         }
 
