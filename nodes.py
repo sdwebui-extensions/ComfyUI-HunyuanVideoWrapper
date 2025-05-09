@@ -221,6 +221,8 @@ class HyVideoTeaCache:
                 "rel_l1_thresh": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01,
                                             "tooltip": "Higher values will make TeaCache more aggressive, faster, but may cause artifacts"}),
                 "cache_device": (["main_device", "offload_device"], {"default": "offload_device", "tooltip": "Device to cache to"}),
+                "start_step": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1, "tooltip": "Start step to apply TeaCache"}),
+                "end_step": ("INT", {"default": -1, "min": -1, "max": 100, "step": 1, "tooltip": "End step to apply TeaCache"}),
 
             },
         }
@@ -230,14 +232,16 @@ class HyVideoTeaCache:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "TeaCache settings for HunyuanVideo to speed up inference"
 
-    def process(self, rel_l1_thresh, cache_device):
+    def process(self, rel_l1_thresh, cache_device, start_step, end_step):
         if cache_device == "main_device":
             teacache_device = mm.get_torch_device()
         else:
             teacache_device = mm.unet_offload_device()
         teacache_args = {
             "rel_l1_thresh": rel_l1_thresh,
-            "cache_device": teacache_device
+            "cache_device": teacache_device,
+            "start_step": start_step,
+            "end_step": end_step
         }
         return (teacache_args,)
 
@@ -449,6 +453,7 @@ class HyVideoModelLoader:
 
         if quantization == "fp8_e4m3fn_fast":
             from .fp8_optimization import convert_fp8_linear
+            params_to_keep.update({"mlp", "modulation", "mod"})
             convert_fp8_linear(patcher.model.diffusion_model, base_dtype, params_to_keep=params_to_keep)
         elif quantization == "fp8_scaled":
             from .hyvideo.modules.fp8_optimization import convert_fp8_linear
@@ -1378,10 +1383,17 @@ class HyVideoSampler:
                 transformer.last_dimensions = (height, width, num_frames)
                 transformer.last_frame_count = num_frames
                 transformer.teacache_device = device
+                transformer.teacache_start_step = 0
+                transformer.teacache_end_step = steps - 1
 
             transformer.enable_teacache = True
             transformer.num_steps = steps
             transformer.rel_l1_thresh = teacache_args["rel_l1_thresh"]
+            transformer.teacache_start_step = teacache_args["start_step"]
+            teacache_end_step = teacache_args["end_step"]
+            if teacache_end_step < 0:
+                teacache_end_step = steps - 1
+            transformer.teacache_end_step = teacache_end_step
         else:
             transformer.enable_teacache = False
 

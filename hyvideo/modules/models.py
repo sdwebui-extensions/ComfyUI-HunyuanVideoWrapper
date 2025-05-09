@@ -754,6 +754,8 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         self.num_steps = 0
         self.teacache_skipped_steps_cond = 0
         self.teacache_skipped_steps_uncond = 0
+        self.teacache_start_step = 0
+        self.teacache_end_step = 100
         self.rel_l1_thresh = 0.15
         self.accumulated_rel_l1_distance = 0
         self.previous_modulated_input = None
@@ -953,6 +955,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         return_dict: bool = True,
         ref_latents: torch.Tensor = None,
         is_uncond = False,
+        current_step: int = 0,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         
         def _process_double_blocks(img, txt, vec, block_args):
@@ -1079,7 +1082,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
             ]
 
         #tea_cache
-        if self.enable_teacache:
+        if self.enable_teacache and self.teacache_start_step <= current_step <= self.teacache_end_step:
             inp = img.clone()
             vec_ = vec.clone()
             txt_ = txt.clone()

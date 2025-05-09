@@ -876,6 +876,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 stg_block_idx=stg_block_idx,
                                 stg_mode=stg_mode,
                                 return_dict=True,
+                                ref_latents=ref_latents
                             )["x"]
                             window_mask = torch.ones_like(noise_pred_context)
 
@@ -913,7 +914,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 stg_mode=stg_mode,
                                 return_dict=True,
                                 ref_latents=ref_latents,
-                                is_uncond = False
+                                is_uncond = False,
+                                current_step = i,
                             )["x"]
                         else:
                             uncond = self.transformer(
@@ -929,7 +931,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 stg_mode=stg_mode,
                                 return_dict=True,
                                 ref_latents=uncond_ref_latents,
-                                is_uncond = True
+                                is_uncond = True,
+                                current_step = i
                             )["x"]
                             cond = self.transformer(
                                 latent_model_input[1].unsqueeze(0),
@@ -944,7 +947,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 stg_mode=stg_mode,
                                 return_dict=True,
                                 ref_latents=ref_latents,
-                                is_uncond = False
+                                is_uncond = False,
+                                current_step = i
                             )["x"]
 
                         # perform guidance
