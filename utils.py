@@ -24,3 +24,16 @@ def print_memory(device):
     log.info(f"-------------------------------")
     #memory_summary = torch.cuda.memory_summary(device=device, abbreviated=False)
     #log.info(f"Memory Summary:\n{memory_summary}")
+
+def optimized_scale(positive_flat, negative_flat):
+
+    # Calculate dot production
+    dot_product = torch.sum(positive_flat * negative_flat, dim=1, keepdim=True)
+
+    # Squared norm of uncondition
+    squared_norm = torch.sum(negative_flat ** 2, dim=1, keepdim=True) + 1e-8
+
+    # st_star = v_cond^T * v_uncond / ||v_uncond||^2
+    st_star = dot_product / squared_norm
+    
+    return st_star

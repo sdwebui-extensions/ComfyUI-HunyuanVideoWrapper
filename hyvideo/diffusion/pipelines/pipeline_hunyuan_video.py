@@ -33,14 +33,15 @@ from diffusers.schedulers import DPMSolverMultistepScheduler
 
 from ...modules import HYVideoDiffusionTransformer
 from comfy.utils import ProgressBar
-
+import math
+from ....utils import optimized_scale
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 EXAMPLE_DOC_STRING = """"""
-from ...modules.posemb_layers import get_nd_rotary_pos_embed
+from ...modules.posemb_layers import get_nd_rotary_pos_embed, get_nd_rotary_pos_embed_new
 from ....enhance_a_video.globals import enable_enhance, disable_enhance, set_enhance_weight
 
-def get_rotary_pos_embed(transformer, latent_video_length, height, width, k=0):
+def get_rotary_pos_embed(transformer, latent_video_length, height, width, k=0, rope_func=get_nd_rotary_pos_embed):
         target_ndim = 3
         ndim = 5 - 2
         rope_theta = 225
@@ -79,7 +80,7 @@ def get_rotary_pos_embed(transformer, latent_video_length, height, width, k=0):
         assert (
             sum(rope_dim_list) == head_dim
         ), "sum(rope_dim_list) should equal to head_dim of attention layer"
-        freqs_cos, freqs_sin = get_nd_rotary_pos_embed(
+        freqs_cos, freqs_sin = rope_func(
             rope_dim_list,
             rope_sizes,
             theta=rope_theta,
@@ -254,6 +255,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             )
         if latents is not None:
             latents = latents.to(device)
+        else:
+            original_latents = None
         noise = randn_tensor(shape, generator=generator, device=device, dtype=self.base_dtype)
     
         if freenoise:
@@ -318,7 +321,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             elif frames_needed < current_frames:
                 latents = latents[:, :, :frames_needed, :, :]
                 logger.info(f"Frames needed less than current frames, cutting down to {frames_needed}")
-    
+
+            original_latents = latents.clone()
             latents = latents * (1 - latent_timestep / 1000) + latent_timestep / 1000 * noise
             print("latents shape:", latents.shape)
 
@@ -338,7 +342,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         if hasattr(self.scheduler, "init_noise_sigma"):
             # scale the initial noise by the standard deviation required by the scheduler
             latents = latents * self.scheduler.init_noise_sigma
-        return latents.to(device), timesteps, i2v_mask, image_cond_latents
+        return latents.to(device), timesteps, i2v_mask, image_cond_latents, noise, original_latents
 
     # Copied from diffusers.pipelines.latent_consistency_models.pipeline_latent_consistency_text2img.LatentConsistencyModelPipeline.get_guidance_scale_embedding
     def get_guidance_scale_embedding(
@@ -423,6 +427,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         timesteps: List[int] = None,
         sigmas: List[float] = None,
         guidance_scale: float = 1.0,
+        use_cfg_zero_star: bool = False,
         cfg_start_percent: float = 0.0,
         cfg_end_percent: float = 1.0,
         batched_cfg: bool = True,
@@ -431,6 +436,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         denoise_strength: float = 1.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.Tensor] = None,
+        mask_latents: Optional[torch.Tensor] = None,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         guidance_rescale: float = 0.0,
         clip_skip: Optional[int] = None,
@@ -452,6 +458,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         feta_args: Optional[Dict] = None,
         leapfusion_img2vid: Optional[bool] = False,
         image_cond_latents: Optional[torch.Tensor] = None,
+        neg_image_cond_latents: Optional[torch.Tensor] = None,
         riflex_freq_index: Optional[int] = None,
         i2v_stability=True,
         loop_args: Optional[Dict] = None,
@@ -540,6 +547,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         # 2. Define call parameters
        
         batch_size = 1
+        ref_latents = None
         device = self._execution_device
 
         prompt_embeds = prompt_embed_dict.get("prompt_embeds", None)
@@ -634,14 +642,25 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             use_context_schedule = True
             from ....context import get_context_scheduler
             context = get_context_scheduler(context_schedule)
-            freqs_cos, freqs_sin = get_rotary_pos_embed(
-                self.transformer, context_frames, height, width
-            )
+            if i2v_condition_type == "reference":
+                freqs_cos, freqs_sin = get_rotary_pos_embed(
+                    self.transformer, context_frames, height, width, rope_func=get_nd_rotary_pos_embed_new
+                )
+            else:
+                freqs_cos, freqs_sin = get_rotary_pos_embed(
+                    self.transformer, context_frames, height, width
+                )
         else:
             # rotary embeddings
-            freqs_cos, freqs_sin = get_rotary_pos_embed(
-                self.transformer, latent_video_length, height, width, k=riflex_freq_index
-            )
+            if i2v_condition_type == "reference":
+                print("Using reference condition")
+                freqs_cos, freqs_sin = get_rotary_pos_embed(
+                    self.transformer, latent_video_length, height, width, rope_func=get_nd_rotary_pos_embed_new
+                )
+            else:
+                freqs_cos, freqs_sin = get_rotary_pos_embed(
+                    self.transformer, latent_video_length, height, width, k=riflex_freq_index
+                )
         if not self.transformer.upcast_rope:
             freqs_cos = freqs_cos.to(self.base_dtype).to(device)
             freqs_sin = freqs_sin.to(self.base_dtype).to(device)
@@ -652,10 +671,11 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         if leapfusion_img2vid:
             logger.info("Single input latent frame detected, LeapFusion img2vid enabled")
             original_latents = latents
+
         # 5. Prepare latent variables
         #num_channels_latents = self.transformer.config.in_channels
         num_channels_latents = 16
-        latents, timesteps, i2v_mask, image_cond_latents = self.prepare_latents(
+        latents, timesteps, i2v_mask, image_cond_latents, noise, original_latents = self.prepare_latents(
             batch_size * num_videos_per_prompt,
             num_channels_latents,
             num_inference_steps,
@@ -699,6 +719,14 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             latent_shift_start_percent = loop_args["start_percent"]
             latent_shift_end_percent = loop_args["end_percent"]
             shift_idx = 0
+
+        if mask_latents is not None:
+            mask_latents_model_input = (
+                torch.cat([mask_latents] * 2)
+                if not math.isclose(self.guidance_scale, 1.0)
+                else mask_latents
+            )
+            print(f'mask_latents_model_input={mask_latents_model_input.shape} ')
         
         logger.info(f"Sampling {video_length} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")
     
@@ -712,6 +740,12 @@ class HunyuanVideoPipeline(DiffusionPipeline):
 
                 if image_cond_latents is not None and i2v_condition_type == "token_replace":
                     latents = torch.concat([original_image_latents, latents[:, :, 1:, :, :]], dim=2)
+                elif image_cond_latents is not None and i2v_condition_type == "reference":
+                    ref_latents = image_cond_latents
+                    if neg_image_cond_latents is not None:
+                        uncond_ref_latents = neg_image_cond_latents
+                    else:
+                        uncond_ref_latents = image_cond_latents
                     
                 latent_model_input = latents
                 input_prompt_embeds = prompt_embeds
@@ -761,6 +795,16 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                         disable_enhance()
 
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+                if mask_latents is not None:
+                    original_latents_noise = original_latents * (1 - t / 1000.0) + t / 1000.0 * noise
+                    original_latent_noise_model_input = (
+                        torch.cat([original_latents_noise] * 2)
+                        if self.do_classifier_free_guidance
+                        else original_latents_noise
+                    )
+                    original_latent_noise_model_input = self.scheduler.scale_model_input(original_latent_noise_model_input, t)
+                    latent_model_input = mask_latents_model_input * latent_model_input + (1 - mask_latents_model_input) * original_latent_noise_model_input
 
                 t_expand = t.repeat(latent_model_input.shape[0])
 
@@ -868,6 +912,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 stg_block_idx=stg_block_idx,
                                 stg_mode=stg_mode,
                                 return_dict=True,
+                                ref_latents=ref_latents,
+                                is_uncond = False
                             )["x"]
                         else:
                             uncond = self.transformer(
@@ -878,10 +924,12 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 text_states_2=input_prompt_embeds_2[0].unsqueeze(0), 
                                 freqs_cos=freqs_cos,
                                 freqs_sin=freqs_sin,
-                                guidance=guidance_expand[0].unsqueeze(0),
+                                guidance=guidance_expand[0].unsqueeze(0) if guidance_expand is not None else None,
                                 stg_block_idx=stg_block_idx,
                                 stg_mode=stg_mode,
                                 return_dict=True,
+                                ref_latents=uncond_ref_latents,
+                                is_uncond = True
                             )["x"]
                             cond = self.transformer(
                                 latent_model_input[1].unsqueeze(0),
@@ -891,21 +939,28 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 text_states_2=input_prompt_embeds_2[1].unsqueeze(0), 
                                 freqs_cos=freqs_cos,
                                 freqs_sin=freqs_sin,
-                                guidance=guidance_expand[1].unsqueeze(0),
+                                guidance=guidance_expand[1].unsqueeze(0) if guidance_expand is not None else None,
                                 stg_block_idx=stg_block_idx,
                                 stg_mode=stg_mode,
                                 return_dict=True,
+                                ref_latents=ref_latents,
+                                is_uncond = False
                             )["x"]
 
                         # perform guidance
                         if cfg_enabled and not self.do_spatio_temporal_guidance:
                             if batched_cfg:
-                                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                                noise_pred = noise_pred_uncond + self.guidance_scale * (
-                                    noise_pred_text - noise_pred_uncond
-                                )
+                                uncond, cond = noise_pred.chunk(2)
+
+                            #https://github.com/WeichenFan/CFG-Zero-star/
+                            if use_cfg_zero_star:
+                                alpha = optimized_scale(
+                                    cond.view(batch_size, -1),
+                                    uncond.view(batch_size, -1)
+                                ).view(batch_size, 1, 1, 1)
                             else:
-                                noise_pred = uncond + self.guidance_scale * (cond - uncond)
+                                alpha = 1.0
+                            noise_pred = uncond * alpha + self.guidance_scale * (cond - uncond * alpha)
                         
             
                         elif self.do_classifier_free_guidance and self.do_spatio_temporal_guidance:
@@ -971,6 +1026,9 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                         )
                     else:
                         comfy_pbar.update(1)
+
+        if mask_latents is not None:
+            latents = mask_latents * latents + (1 - mask_latents) * original_latents
 
         if image_cond_latents is not None:
             if leapfusion_img2vid or i2v_condition_type == "latent_concat":

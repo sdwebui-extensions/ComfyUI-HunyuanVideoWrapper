@@ -302,3 +302,52 @@ def get_1d_rotary_pos_embed_riflex(
             torch.ones_like(freqs), freqs
         )  # complex64     # [S, D/2]
         return freqs_cis
+    
+def get_nd_rotary_pos_embed_new(rope_dim_list, start, *args, theta=10000., use_real=False, 
+                            theta_rescale_factor: Union[float, List[float]]=1.0,
+                            interpolation_factor: Union[float, List[float]]=1.0,
+                            concat_dict = {'mode': 'timecat-w', 'bias': -1}, num_frames: int = 129, k: int = 0,
+                            ):
+
+    grid = get_meshgrid_nd(start, *args, dim=len(rope_dim_list))   # [3, W, H, D] / [2, W, H]
+    if len(concat_dict)<1:
+        pass
+    else:
+        if concat_dict['mode']=='timecat':
+            bias = grid[:,:1].clone()
+            bias[0] = concat_dict['bias']*torch.ones_like(bias[0])
+            grid = torch.cat([bias, grid], dim=1)
+            
+        elif concat_dict['mode']=='timecat-w': 
+            bias = grid[:,:1].clone()
+            bias[0] = concat_dict['bias']*torch.ones_like(bias[0])
+            bias[2] += start[-1]    ## ref https://github.com/Yuanshi9815/OminiControl/blob/main/src/generate.py#L178
+            grid = torch.cat([bias, grid], dim=1)
+    if isinstance(theta_rescale_factor, int) or isinstance(theta_rescale_factor, float):
+        theta_rescale_factor = [theta_rescale_factor] * len(rope_dim_list)
+    elif isinstance(theta_rescale_factor, list) and len(theta_rescale_factor) == 1:
+        theta_rescale_factor = [theta_rescale_factor[0]] * len(rope_dim_list)
+    assert len(theta_rescale_factor) == len(rope_dim_list), "len(theta_rescale_factor) should equal to len(rope_dim_list)"
+
+    if isinstance(interpolation_factor, int) or isinstance(interpolation_factor, float):
+        interpolation_factor = [interpolation_factor] * len(rope_dim_list)
+    elif isinstance(interpolation_factor, list) and len(interpolation_factor) == 1:
+        interpolation_factor = [interpolation_factor[0]] * len(rope_dim_list)
+    assert len(interpolation_factor) == len(rope_dim_list), "len(interpolation_factor) should equal to len(rope_dim_list)"
+
+    # use 1/ndim of dimensions to encode grid_axis
+    embs = []
+    for i in range(len(rope_dim_list)):
+        emb = get_1d_rotary_pos_embed(rope_dim_list[i], grid[i].reshape(-1), theta, use_real=use_real,
+                                      theta_rescale_factor=theta_rescale_factor[i],
+                                      interpolation_factor=interpolation_factor[i])    # 2 x [WHD, rope_dim_list[i]]
+        
+        embs.append(emb)
+
+    if use_real:
+        cos = torch.cat([emb[0] for emb in embs], dim=1)    # (WHD, D/2)
+        sin = torch.cat([emb[1] for emb in embs], dim=1)    # (WHD, D/2)
+        return cos, sin
+    else:
+        emb = torch.cat(embs, dim=1)    # (WHD, D/2)
+        return emb
