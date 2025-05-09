@@ -1251,6 +1251,36 @@ class HunyuanVideoFresca:
 
     def process(self, **kwargs):
         return (kwargs,)
+
+class HunyuanVideoSLG:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "double_blocks": ("STRING", {"default": "", "tooltip": "Blocks to skip uncond on, separated by comma, index starts from 0"}),
+            "single_blocks": ("STRING", {"default": "10", "tooltip": "Blocks to skip uncond on, separated by comma, index starts from 0"}),
+            "start_percent": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percent of SLG signal"}),
+            "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percent of SLG signal"}),
+            },
+        }
+
+    RETURN_TYPES = ("SLGARGS", )
+    RETURN_NAMES = ("slg_args",)
+    FUNCTION = "process"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "Skips uncond on the selected blocks"
+
+    def process(self, double_blocks, single_blocks, start_percent, end_percent):
+
+        slg_double_block_list = [int(x.strip()) for x in double_blocks.split(",")] if double_blocks else None
+        slg_single_block_list = [int(x.strip()) for x in single_blocks.split(",")] if single_blocks else None
+       
+        slg_args = {
+            "double_blocks": slg_double_block_list,
+            "single_blocks": slg_single_block_list,
+            "start_percent": start_percent,
+            "end_percent": end_percent,
+        }
+        return (slg_args,)
     
 #region Sampler
 class HyVideoSampler:
@@ -1287,6 +1317,7 @@ class HyVideoSampler:
                 "i2v_mode": (["stability", "dynamic"], {"default": "dynamic", "tooltip": "I2V mode for image2video process"}),
                 "loop_args": ("LOOPARGS", ),
                 "fresca_args": ("FRESCA_ARGS", ),
+                "slg_args": ("SLGARGS", ),
                 "mask": ("MASK", ),
             }
         }
@@ -1298,7 +1329,7 @@ class HyVideoSampler:
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
                 samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, 
-                teacache_args=None, scheduler=None, image_cond_latents=None, neg_image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability", loop_args=None, fresca_args=None, mask=None):
+                teacache_args=None, scheduler=None, image_cond_latents=None, neg_image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability", loop_args=None, fresca_args=None, slg_args=None, mask=None):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1466,6 +1497,7 @@ class HyVideoSampler:
             batched_cfg=batched_cfg,
             use_cfg_zero_star=use_cfg_zero_star,
             fresca_args=fresca_args,
+            slg_args=slg_args,
             embedded_guidance_scale=embedded_guidance_scale,
             latents=input_latents,
             mask_latents=mask_latents,
@@ -1905,7 +1937,8 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoEncodeKeyframes": HyVideoEncodeKeyframes,
     "HyVideoTextEmbedBridge": HyVideoTextEmbedBridge,
     "HyVideoLoopArgs": HyVideoLoopArgs,
-    "HunyuanVideoFresca": HunyuanVideoFresca
+    "HunyuanVideoFresca": HunyuanVideoFresca,
+    "HunyuanVideoSLG": HunyuanVideoSLG
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1934,5 +1967,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoEncodeKeyframes": "HyVideo Encode Keyframes",
     "HyVideoTextEmbedBridge": "HyVideo TextEmbed Bridge",
     "HyVideoLoopArgs": "HyVideo Loop Args",
-    "HunyuanVideoFresca": "HunyuanVideo Fresca"
+    "HunyuanVideoFresca": "HunyuanVideo Fresca",
+    "HunyuanVideoSLG": "HunyuanVideo SLG",
     }

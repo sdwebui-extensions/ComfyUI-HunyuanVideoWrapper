@@ -764,6 +764,11 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         self.last_frame_count = None
         self.teacache_device = None
 
+        self.slg_single_blocks = None
+        self.slg_double_blocks = None
+        self.slg_start_percent = 0.0
+        self.slg_end_percent = 1.0
+
     # thanks @2kpr for the initial block swap code!
     def block_swap(self, double_blocks_to_swap, single_blocks_to_swap, offload_txt_in=False, offload_img_in=False):
         print(f"Swapping {double_blocks_to_swap + 1} double blocks and {single_blocks_to_swap + 1} single blocks")
@@ -956,10 +961,16 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         ref_latents: torch.Tensor = None,
         is_uncond = False,
         current_step: int = 0,
+        current_step_percentage: float = 0,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         
         def _process_double_blocks(img, txt, vec, block_args):
             for b, block in enumerate(self.double_blocks):
+                if self.slg_double_blocks is not None:
+                    if b in self.slg_double_blocks and is_uncond:
+                        if self.slg_start_percent <= current_step_percentage <= self.slg_end_percent:
+                            print(f"Skipping double block {b}")
+                            continue
                 if b <= self.double_blocks_to_swap and self.double_blocks_to_swap >= 0:
                     block.to(self.main_device)
                     
@@ -971,6 +982,11 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
 
         def _process_single_blocks(x, vec, txt_seq_len, block_args, stg_mode=None, stg_block_idx=None):
             for b, block in enumerate(self.single_blocks):
+                if self.slg_single_blocks is not None:
+                    if b in self.slg_single_blocks and is_uncond:
+                        if self.slg_start_percent <= current_step_percentage <= self.slg_end_percent:
+                            print(f"Skipping single block {b}")
+                            continue
                 if b <= self.single_blocks_to_swap and self.single_blocks_to_swap >= 0:
                     block.to(self.main_device)
                     

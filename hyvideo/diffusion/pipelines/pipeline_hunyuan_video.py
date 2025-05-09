@@ -429,6 +429,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         guidance_scale: float = 1.0,
         use_cfg_zero_star: bool = False,
         fresca_args: Optional[Dict[str, Any]] = None,
+        slg_args: Optional[Dict[str, Any]] = None,
         cfg_start_percent: float = 0.0,
         cfg_end_percent: float = 1.0,
         batched_cfg: bool = True,
@@ -734,6 +735,15 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             fresca_scale_high = fresca_args.get("fresca_scale_high", 1.25)
             fresca_freq_cutoff = fresca_args.get("fresca_freq_cutoff", 20)
         
+        if slg_args is not None:
+            assert batched_cfg is not None, "Batched cfg is not supported with SLG"
+            self.transformer.slg_single_blocks = slg_args["single_blocks"]
+            self.transformer.slg_double_blocks = slg_args["double_blocks"]
+            self.transformer.slg_start_percent = slg_args["start_percent"]
+            self.transformer.slg_end_percent = slg_args["end_percent"]
+        else:
+            self.transformer.slg_blocks = None
+        
         logger.info(f"Sampling {video_length} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")
     
         comfy_pbar = ProgressBar(len(timesteps))
@@ -922,6 +932,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 ref_latents=ref_latents,
                                 is_uncond = False,
                                 current_step = i,
+                                current_step_percentage = current_step_percentage
                             )["x"]
                         else:
                             uncond = self.transformer(
@@ -938,7 +949,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 return_dict=True,
                                 ref_latents=uncond_ref_latents,
                                 is_uncond = True,
-                                current_step = i
+                                current_step = i,
+                                current_step_percentage = current_step_percentage
                             )["x"]
                             cond = self.transformer(
                                 latent_model_input[1].unsqueeze(0),
@@ -954,7 +966,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 return_dict=True,
                                 ref_latents=ref_latents,
                                 is_uncond = False,
-                                current_step = i
+                                current_step = i,
+                                current_step_percentage = current_step_percentage
                             )["x"]
 
                         # perform guidance
