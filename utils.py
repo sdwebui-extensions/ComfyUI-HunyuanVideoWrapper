@@ -66,11 +66,11 @@ def fourier_filter(x, scale_low=1.0, scale_high=1.5, freq_cutoff=20):
     x_freq = fft.fftshift(x_freq, dim=(-2, -1))
 
     # 2) Create a mask to scale frequencies differently
-    C, B, H, W = x_freq.shape
+    B, C, T, H, W = x_freq.shape
     crow, ccol = H // 2, W // 2
 
     # Initialize mask with high-frequency scaling factor
-    mask = torch.ones((C, B, H, W), device=device) * scale_high
+    mask = torch.ones((B, C, T, H, W), device=device) * scale_high
 
     # Apply low-frequency scaling factor to center region
     mask[
