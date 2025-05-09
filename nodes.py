@@ -1425,6 +1425,7 @@ class HyVideoSampler:
             transformer.teacache_skipped_steps_cond = transformer.teacache_skipped_steps_uncond =0
             transformer.previous_modulated_input_cond = transformer.previous_modulated_input_uncond = None
             transformer.previous_residual_cond = transformer.previous_residual_uncond = None
+            transformer.accumulated_rel_l1_distance_cond = transformer.accumulated_rel_l1_distance_uncond = 0
             transformer.teacache_device = device
             transformer.num_steps = steps
             transformer.rel_l1_thresh = teacache_args["rel_l1_thresh"]

@@ -1117,17 +1117,6 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                 normed_inp, shift=img_mod1_shift, scale=img_mod1_scale
             )
 
-            # Use separate variables for conditional and unconditional passes
-            if not hasattr(self, 'previous_modulated_input_cond'):
-                self.previous_modulated_input_cond = None
-                self.previous_modulated_input_uncond = None
-                self.previous_residual_cond = None
-                self.previous_residual_uncond = None
-                self.accumulated_rel_l1_distance_cond = 0
-                self.accumulated_rel_l1_distance_uncond = 0
-                self.teacache_skipped_steps_cond = 0
-                self.teacache_skipped_steps_uncond = 0
-
             # Choose the appropriate cache based on whether this is a conditional or unconditional pass
             previous_modulated_input = self.previous_modulated_input_uncond if is_uncond else self.previous_modulated_input_cond
             previous_residual = self.previous_residual_uncond if is_uncond else self.previous_residual_cond
