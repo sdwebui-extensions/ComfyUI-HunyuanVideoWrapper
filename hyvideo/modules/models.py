@@ -1166,6 +1166,12 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                     self.teacache_skipped_steps_uncond += 1
                 else:
                     self.teacache_skipped_steps_cond += 1
+                
+                # Verify tensor dimensions match before adding
+                if img.shape == previous_residual.shape:
+                    img = img + previous_residual.to(img.device)
+                else:
+                    should_calc = True # Force recalculation if dimensions don't match
 
             if should_calc:
                 ori_img = img.clone()
