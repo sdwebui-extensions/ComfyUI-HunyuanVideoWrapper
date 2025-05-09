@@ -742,7 +742,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
             self.transformer.slg_start_percent = slg_args["start_percent"]
             self.transformer.slg_end_percent = slg_args["end_percent"]
         else:
-            self.transformer.slg_blocks = None
+            self.transformer.slg_single_blocks = self.transformer.slg_double_blocks = None
         
         logger.info(f"Sampling {video_length} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")
     

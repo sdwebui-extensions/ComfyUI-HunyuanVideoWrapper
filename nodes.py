@@ -1419,23 +1419,15 @@ class HyVideoSampler:
 
         # Initialize TeaCache if enabled
         if teacache_args is not None:
-            # Check if dimensions have changed since last run
-            if (not hasattr(transformer, 'last_dimensions') or
-                    transformer.last_dimensions != (height, width, num_frames) or
-                    not hasattr(transformer, 'last_frame_count') or
-                    transformer.last_frame_count != num_frames):
-                # Reset TeaCache state on dimension change
-                transformer.cnt = 0
-                transformer.teacache_skipped_steps_cond = 0
-                transformer.teacache_skipped_steps_uncond = 0
-                transformer.accumulated_rel_l1_distance = 0
-                transformer.previous_modulated_input = None
-                transformer.previous_residual = None
-                transformer.last_dimensions = (height, width, num_frames)
-                transformer.last_frame_count = num_frames
-                transformer.teacache_device = device
-                transformer.teacache_start_step = 0
-                transformer.teacache_end_step = steps - 1
+            transformer.cnt = 0
+            transformer.teacache_skipped_steps_cond = 0
+            transformer.teacache_skipped_steps_uncond = 0
+            transformer.accumulated_rel_l1_distance = 0
+            transformer.previous_modulated_input = None
+            transformer.previous_residual = None
+            transformer.teacache_device = device
+            transformer.teacache_start_step = 0
+            transformer.teacache_end_step = steps - 1
 
             transformer.enable_teacache = True
             transformer.num_steps = steps
