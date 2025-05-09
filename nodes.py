@@ -330,7 +330,7 @@ class HyVideoModelLoader:
         in_channels = sd["img_in.proj.weight"].shape[1]
         if in_channels == 16 and "i2v" in model.lower():
             i2v_condition_type = "token_replace"
-        elif in_channels == 16 and not "i2v" in model.lower():
+        elif in_channels == 16 and "custom" in model.lower():
             i2v_condition_type = "reference"
         else:
             i2v_condition_type = "latent_concat"
