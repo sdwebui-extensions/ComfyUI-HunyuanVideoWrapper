@@ -1419,15 +1419,13 @@ class HyVideoSampler:
 
         # Initialize TeaCache if enabled
         if teacache_args is not None:
-            transformer.cnt = 0
-            transformer.teacache_skipped_steps_cond = 0
-            transformer.teacache_skipped_steps_uncond = 0
-            transformer.accumulated_rel_l1_distance = 0
-            transformer.previous_modulated_input_cond = None
-            transformer.previous_modulated_input_uncond = None
-            transformer.previous_residual = None
-            transformer.teacache_device = device
             transformer.enable_teacache = True
+            transformer.cnt = 0
+            transformer.accumulated_rel_l1_distance = 0
+            transformer.teacache_skipped_steps_cond = transformer.teacache_skipped_steps_uncond =0
+            transformer.previous_modulated_input_cond = transformer.previous_modulated_input_uncond = None
+            transformer.previous_residual_cond = transformer.previous_residual_uncond = None
+            transformer.teacache_device = device
             transformer.num_steps = steps
             transformer.rel_l1_thresh = teacache_args["rel_l1_thresh"]
             transformer.teacache_start_step = teacache_args["start_step"]

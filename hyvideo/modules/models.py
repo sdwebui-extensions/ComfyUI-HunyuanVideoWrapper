@@ -760,9 +760,11 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         self.accumulated_rel_l1_distance = 0
         self.previous_modulated_input_cond = None
         self.previous_modulated_input_uncond = None
-        self.previous_residual = None
+        self.previous_residual_cond = None
+        self.previous_residual_uncond = None
         self.teacache_device = None
 
+        #slg
         self.slg_single_blocks = None
         self.slg_double_blocks = None
         self.slg_start_percent = 0.0
