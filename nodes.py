@@ -1426,9 +1426,6 @@ class HyVideoSampler:
             transformer.previous_modulated_input = None
             transformer.previous_residual = None
             transformer.teacache_device = device
-            transformer.teacache_start_step = 0
-            transformer.teacache_end_step = steps - 1
-
             transformer.enable_teacache = True
             transformer.num_steps = steps
             transformer.rel_l1_thresh = teacache_args["rel_l1_thresh"]
