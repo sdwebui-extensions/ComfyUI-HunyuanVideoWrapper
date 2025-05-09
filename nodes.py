@@ -1233,6 +1233,25 @@ class HyVideoLoopArgs:
     def process(self, **kwargs):
         return (kwargs,)
     
+class HunyuanVideoFresca:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                "fresca_scale_low": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "fresca_scale_high": ("FLOAT", {"default": 1.25, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "fresca_freq_cutoff": ("INT", {"default": 20, "min": 0, "max": 10000, "step": 1}),
+            },
+        }
+
+    RETURN_TYPES = ("FRESCA_ARGS", )
+    RETURN_NAMES = ("fresca_args",)
+    FUNCTION = "process"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "https://github.com/WikiChao/FreSca"
+
+    def process(self, **kwargs):
+        return (kwargs,)
+    
 #region Sampler
 class HyVideoSampler:
     @classmethod
@@ -1267,6 +1286,7 @@ class HyVideoSampler:
                 "riflex_freq_index": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Frequency index for RIFLEX, disabled when 0, default 4. Allows for new frames to be generated after 129 without looping"}),
                 "i2v_mode": (["stability", "dynamic"], {"default": "dynamic", "tooltip": "I2V mode for image2video process"}),
                 "loop_args": ("LOOPARGS", ),
+                "fresca_args": ("FRESCA_ARGS", ),
                 "mask": ("MASK", ),
             }
         }
@@ -1278,7 +1298,7 @@ class HyVideoSampler:
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
                 samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, 
-                teacache_args=None, scheduler=None, image_cond_latents=None, neg_image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability", loop_args=None, mask=None):
+                teacache_args=None, scheduler=None, image_cond_latents=None, neg_image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability", loop_args=None, fresca_args=None, mask=None):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1445,6 +1465,7 @@ class HyVideoSampler:
             cfg_end_percent=cfg_end_percent,
             batched_cfg=batched_cfg,
             use_cfg_zero_star=use_cfg_zero_star,
+            fresca_args=fresca_args,
             embedded_guidance_scale=embedded_guidance_scale,
             latents=input_latents,
             mask_latents=mask_latents,
@@ -1884,6 +1905,7 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoEncodeKeyframes": HyVideoEncodeKeyframes,
     "HyVideoTextEmbedBridge": HyVideoTextEmbedBridge,
     "HyVideoLoopArgs": HyVideoLoopArgs,
+    "HunyuanVideoFresca": HunyuanVideoFresca
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1912,4 +1934,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoEncodeKeyframes": "HyVideo Encode Keyframes",
     "HyVideoTextEmbedBridge": "HyVideo TextEmbed Bridge",
     "HyVideoLoopArgs": "HyVideo Loop Args",
+    "HunyuanVideoFresca": "HunyuanVideo Fresca"
     }

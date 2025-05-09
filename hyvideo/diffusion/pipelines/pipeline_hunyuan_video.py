@@ -34,7 +34,7 @@ from diffusers.schedulers import DPMSolverMultistepScheduler
 from ...modules import HYVideoDiffusionTransformer
 from comfy.utils import ProgressBar
 import math
-from ....utils import optimized_scale
+from ....utils import optimized_scale, fourier_filter
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 EXAMPLE_DOC_STRING = """"""
@@ -428,6 +428,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         sigmas: List[float] = None,
         guidance_scale: float = 1.0,
         use_cfg_zero_star: bool = False,
+        fresca_args: Optional[Dict[str, Any]] = None,
         cfg_start_percent: float = 0.0,
         cfg_end_percent: float = 1.0,
         batched_cfg: bool = True,
@@ -727,6 +728,11 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 else mask_latents
             )
             print(f'mask_latents_model_input={mask_latents_model_input.shape} ')
+
+        if fresca_args is not None:
+            fresca_scale_low = fresca_args.get("fresca_scale_low", 1.0)
+            fresca_scale_high = fresca_args.get("fresca_scale_high", 1.25)
+            fresca_freq_cutoff = fresca_args.get("fresca_freq_cutoff", 20)
         
         logger.info(f"Sampling {video_length} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")
     
@@ -964,9 +970,18 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 ).view(batch_size, 1, 1, 1)
                             else:
                                 alpha = 1.0
-                            noise_pred = uncond * alpha + self.guidance_scale * (cond - uncond * alpha)
+                            #https://github.com/WikiChao/FreSca
+                            if fresca_args is not None:
+                                filtered_cond = fourier_filter(
+                                    cond - uncond,
+                                    scale_low=fresca_scale_low,
+                                    scale_high=fresca_scale_high,
+                                    freq_cutoff=fresca_freq_cutoff,
+                                )
+                                noise_pred = uncond * alpha + self.guidance_scale * filtered_cond * alpha
+                            else:
+                                noise_pred = uncond * alpha + self.guidance_scale * (cond - uncond * alpha)
                         
-            
                         elif self.do_classifier_free_guidance and self.do_spatio_temporal_guidance:
                             raise NotImplementedError
                             noise_pred_uncond, noise_pred_text, noise_pred_perturb = noise_pred.chunk(3)
@@ -980,6 +995,14 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                             noise_pred = noise_pred_text + self._stg_scale * (
                                 noise_pred_text - noise_pred_perturb
                             )
+                        else:
+                            if fresca_args is not None:
+                                noise_pred = fourier_filter(
+                                    noise_pred,
+                                    scale_low=fresca_scale_low,
+                                    scale_high=fresca_scale_high,
+                                    freq_cutoff=fresca_freq_cutoff,
+                                )
                         if latent_shift_loop:
                             #reverse latent shift
                             if latent_shift_start_percent <= current_step_percentage <= latent_shift_end_percent:
