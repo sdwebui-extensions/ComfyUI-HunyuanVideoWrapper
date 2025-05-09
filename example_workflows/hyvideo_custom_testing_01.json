@@ -218,38 +218,6 @@
       "bgcolor": "#533"
     },
     {
-      "id": 70,
-      "type": "HyVideoTeaCache",
-      "pos": [
-        418.9670104980469,
-        -601.5409545898438
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 3,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "teacache_args",
-          "type": "TEACACHEARGS",
-          "links": []
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-hunyuanvideowrapper",
-        "ver": "83f0bbb8694cf92e994189b045270aab4e5029b5",
-        "Node name for S&R": "HyVideoTeaCache"
-      },
-      "widgets_values": [
-        0.15,
-        "offload_device"
-      ]
-    },
-    {
       "id": 41,
       "type": "HyVideoEncode",
       "pos": [
@@ -525,7 +493,7 @@
         274
       ],
       "flags": {},
-      "order": 4,
+      "order": 3,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -567,7 +535,7 @@
         314
       ],
       "flags": {},
-      "order": 5,
+      "order": 4,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -701,7 +669,7 @@
         130
       ],
       "flags": {},
-      "order": 6,
+      "order": 5,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -791,13 +759,13 @@
           "hidden": false,
           "paused": false,
           "params": {
-            "filename": "HunyuanVideo_00001.mp4",
+            "filename": "HunyuanVideoCustom_wrapper_00001.mp4",
             "subfolder": "",
             "type": "temp",
             "format": "video/h264-mp4",
             "frame_rate": 24,
-            "workflow": "HunyuanVideo_00001.png",
-            "fullpath": "N:\\AI\\ComfyUI\\temp\\HunyuanVideo_00001.mp4"
+            "workflow": "HunyuanVideoCustom_wrapper_00001.png",
+            "fullpath": "N:\\AI\\ComfyUI\\temp\\HunyuanVideoCustom_wrapper_00001.mp4"
           },
           "muted": false
         }
@@ -965,10 +933,42 @@
         "fixed",
         true,
         1,
-        "DPMSolverMultistepScheduler",
+        "FlowMatchDiscreteScheduler",
         0,
         "dynamic",
         ""
+      ]
+    },
+    {
+      "id": 70,
+      "type": "HyVideoTeaCache",
+      "pos": [
+        418.9670104980469,
+        -601.5409545898438
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "teacache_args",
+          "type": "TEACACHEARGS",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-hunyuanvideowrapper",
+        "ver": "83f0bbb8694cf92e994189b045270aab4e5029b5",
+        "Node name for S&R": "HyVideoTeaCache"
+      },
+      "widgets_values": [
+        0.10000000000000002,
+        "offload_device"
       ]
     }
   ],
@@ -1172,8 +1172,8 @@
     "ds": {
       "scale": 0.9090909090909091,
       "offset": [
-        1959.534953567769,
-        637.1089221219311
+        1744.8834693952617,
+        641.5040879878228
       ]
     },
     "frontendVersion": "1.19.4",
