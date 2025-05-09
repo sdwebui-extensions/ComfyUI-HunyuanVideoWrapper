@@ -1423,7 +1423,8 @@ class HyVideoSampler:
             transformer.teacache_skipped_steps_cond = 0
             transformer.teacache_skipped_steps_uncond = 0
             transformer.accumulated_rel_l1_distance = 0
-            transformer.previous_modulated_input = None
+            transformer.previous_modulated_input_cond = None
+            transformer.previous_modulated_input_uncond = None
             transformer.previous_residual = None
             transformer.teacache_device = device
             transformer.enable_teacache = True

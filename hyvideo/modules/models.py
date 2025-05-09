@@ -758,7 +758,8 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         self.teacache_end_step = 100
         self.rel_l1_thresh = 0.15
         self.accumulated_rel_l1_distance = 0
-        self.previous_modulated_input = None
+        self.previous_modulated_input_cond = None
+        self.previous_modulated_input_uncond = None
         self.previous_residual = None
         self.teacache_device = None
 
