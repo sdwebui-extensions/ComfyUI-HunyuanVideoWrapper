@@ -752,14 +752,23 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         self.enable_teacache = False
         self.cnt = 0
         self.num_steps = 0
-        self.teacache_skipped_steps = 0
+        self.teacache_skipped_steps_cond = 0
+        self.teacache_skipped_steps_uncond = 0
+        self.teacache_start_step = 0
+        self.teacache_end_step = 100
         self.rel_l1_thresh = 0.15
         self.accumulated_rel_l1_distance = 0
-        self.previous_modulated_input = None
-        self.previous_residual = None
-        self.last_dimensions = None
-        self.last_frame_count = None
+        self.previous_modulated_input_cond = None
+        self.previous_modulated_input_uncond = None
+        self.previous_residual_cond = None
+        self.previous_residual_uncond = None
         self.teacache_device = None
+
+        #slg
+        self.slg_single_blocks = None
+        self.slg_double_blocks = None
+        self.slg_start_percent = 0.0
+        self.slg_end_percent = 1.0
 
     # thanks @2kpr for the initial block swap code!
     def block_swap(self, double_blocks_to_swap, single_blocks_to_swap, offload_txt_in=False, offload_img_in=False):
@@ -950,10 +959,19 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         stg_mode: str = None,
         stg_block_idx: int = -1,
         return_dict: bool = True,
+        ref_latents: torch.Tensor = None,
+        is_uncond = False,
+        current_step: int = 0,
+        current_step_percentage: float = 0,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         
         def _process_double_blocks(img, txt, vec, block_args):
             for b, block in enumerate(self.double_blocks):
+                if self.slg_double_blocks is not None:
+                    if b in self.slg_double_blocks and is_uncond:
+                        if self.slg_start_percent <= current_step_percentage <= self.slg_end_percent:
+                            print(f"Skipping double block {b}")
+                            continue
                 if b <= self.double_blocks_to_swap and self.double_blocks_to_swap >= 0:
                     block.to(self.main_device)
                     
@@ -965,6 +983,11 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
 
         def _process_single_blocks(x, vec, txt_seq_len, block_args, stg_mode=None, stg_block_idx=None):
             for b, block in enumerate(self.single_blocks):
+                if self.slg_single_blocks is not None:
+                    if b in self.slg_single_blocks and is_uncond:
+                        if self.slg_start_percent <= current_step_percentage <= self.slg_end_percent:
+                            print(f"Skipping single block {b}")
+                            continue
                 if b <= self.single_blocks_to_swap and self.single_blocks_to_swap >= 0:
                     block.to(self.main_device)
                     
@@ -1030,6 +1053,12 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
             self.img_in.to(self.main_device)
 
         img = self.img_in(img)
+
+        if ref_latents is not None:
+            ref_latents = self.img_in(ref_latents)
+            ref_length = ref_latents.shape[-2]
+            img = torch.cat([ref_latents, img], dim=-2) # t c
+
         if self.text_projection == "linear":
             txt = self.txt_in(txt)
         elif self.text_projection == "single_refiner":
@@ -1070,7 +1099,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
             ]
 
         #tea_cache
-        if self.enable_teacache:
+        if self.enable_teacache and self.teacache_start_step <= current_step <= self.teacache_end_step:
             inp = img.clone()
             vec_ = vec.clone()
             txt_ = txt.clone()
@@ -1088,29 +1117,51 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                 normed_inp, shift=img_mod1_shift, scale=img_mod1_scale
             )
 
+            # Choose the appropriate cache based on whether this is a conditional or unconditional pass
+            previous_modulated_input = self.previous_modulated_input_uncond if is_uncond else self.previous_modulated_input_cond
+            previous_residual = self.previous_residual_uncond if is_uncond else self.previous_residual_cond
+            accumulated_rel_l1_distance = self.accumulated_rel_l1_distance_uncond if is_uncond else self.accumulated_rel_l1_distance_cond
+
             if self.cnt == 0 or self.cnt == self.num_steps-1:
                 should_calc = True
-                self.accumulated_rel_l1_distance = 0
-                self.previous_modulated_input = modulated_inp.clone()
+                accumulated_rel_l1_distance = 0
+                previous_modulated_input = modulated_inp.clone()
             else:
                 coefficients = [7.33226126e+02, -4.01131952e+02, 6.75869174e+01, -3.14987800e+00, 9.61237896e-02]
                 rescale_func = np.poly1d(coefficients)
-                self.accumulated_rel_l1_distance += rescale_func(((modulated_inp-self.previous_modulated_input).abs().mean() / self.previous_modulated_input.abs().mean()).cpu().item())
-                if self.accumulated_rel_l1_distance < self.rel_l1_thresh:
-                    should_calc = False
+                if previous_modulated_input is not None:
+                    accumulated_rel_l1_distance += rescale_func(((modulated_inp-previous_modulated_input).abs().mean() / previous_modulated_input.abs().mean()).cpu().item())
+                    if accumulated_rel_l1_distance < self.rel_l1_thresh:
+                        should_calc = False
+                    else:
+                        should_calc = True
+                        accumulated_rel_l1_distance = 0
                 else:
                     should_calc = True
-                    self.accumulated_rel_l1_distance = 0
-            self.previous_modulated_input = modulated_inp.clone()
+                    accumulated_rel_l1_distance = 0
+            
+            # Store back the appropriate values
+            if is_uncond:
+                self.previous_modulated_input_uncond = modulated_inp.clone()
+                self.accumulated_rel_l1_distance_uncond = accumulated_rel_l1_distance
+            else:
+                self.previous_modulated_input_cond = modulated_inp.clone()
+                self.accumulated_rel_l1_distance_cond = accumulated_rel_l1_distance
+                
             self.cnt += 1
             if self.cnt == self.num_steps:
                 self.cnt = 0
 
-            if not should_calc and self.previous_residual is not None:
-                self.teacache_skipped_steps += 1
+            if not should_calc and previous_residual is not None:
+                # Increment the appropriate skipped steps counter
+                if is_uncond:
+                    self.teacache_skipped_steps_uncond += 1
+                else:
+                    self.teacache_skipped_steps_cond += 1
+                
                 # Verify tensor dimensions match before adding
-                if img.shape == self.previous_residual.shape:
-                    img = img + self.previous_residual.to(img.device)
+                if img.shape == previous_residual.shape:
+                    img = img + previous_residual.to(img.device)
                 else:
                     should_calc = True # Force recalculation if dimensions don't match
 
@@ -1123,7 +1174,13 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                 x = _process_single_blocks(x, vec, txt.shape[1], block_args, stg_mode, stg_block_idx)
 
                 img = x[:, :img_seq_len, ...]
-                self.previous_residual = (img - ori_img).to(self.teacache_device)
+                new_residual = (img - ori_img).to(self.teacache_device)
+                
+                # Store the new residual in the appropriate cache
+                if is_uncond:
+                    self.previous_residual_uncond = new_residual
+                else:
+                    self.previous_residual_cond = new_residual
         else:
             # Pass through DiT blocks
             img, txt = _process_double_blocks(img, txt, vec, block_args)
@@ -1131,6 +1188,9 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
             x = torch.cat((img, txt), 1)
             x = _process_single_blocks(x, vec, txt.shape[1], block_args, stg_mode, stg_block_idx)
             img = x[:, :img_seq_len, ...]
+
+        if ref_latents is not None:
+            img = img[:, ref_length:]
 
         # ---------------------------- Final layer ------------------------------
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)

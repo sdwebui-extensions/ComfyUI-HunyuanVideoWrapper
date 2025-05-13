@@ -2,7 +2,8 @@ import os
 import torch
 import json
 import gc
-from .utils import log, print_memory
+from tqdm import tqdm
+from .utils import log, print_memory, optimized_scale
 from diffusers.video_processor import VideoProcessor
 from typing import List, Dict, Any, Tuple
 import numpy as np
@@ -220,6 +221,8 @@ class HyVideoTeaCache:
                 "rel_l1_thresh": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01,
                                             "tooltip": "Higher values will make TeaCache more aggressive, faster, but may cause artifacts"}),
                 "cache_device": (["main_device", "offload_device"], {"default": "offload_device", "tooltip": "Device to cache to"}),
+                "start_step": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1, "tooltip": "Start step to apply TeaCache"}),
+                "end_step": ("INT", {"default": -1, "min": -1, "max": 100, "step": 1, "tooltip": "End step to apply TeaCache"}),
 
             },
         }
@@ -229,14 +232,16 @@ class HyVideoTeaCache:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "TeaCache settings for HunyuanVideo to speed up inference"
 
-    def process(self, rel_l1_thresh, cache_device):
+    def process(self, rel_l1_thresh, cache_device, start_step, end_step):
         if cache_device == "main_device":
             teacache_device = mm.get_torch_device()
         else:
             teacache_device = mm.unet_offload_device()
         teacache_args = {
             "rel_l1_thresh": rel_l1_thresh,
-            "cache_device": teacache_device
+            "cache_device": teacache_device,
+            "start_step": start_step,
+            "end_step": end_step
         }
         return (teacache_args,)
 
@@ -276,7 +281,7 @@ class HyVideoModelLoader:
                 "model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
 
             "base_precision": (["fp32", "bf16"], {"default": "bf16"}),
-            "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_e5m2', 'fp8_scaled', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6", "torchao_int4", "torchao_int8"], {"default": 'disabled', "tooltip": "optional quantization method"}),
+            "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_e5m2', 'fp8_scaled'], {"default": 'disabled', "tooltip": "optional quantization method"}),
             "load_device": (["main_device", "offload_device"], {"default": "main_device"}),
             },
             "optional": {
@@ -325,6 +330,8 @@ class HyVideoModelLoader:
         in_channels = sd["img_in.proj.weight"].shape[1]
         if in_channels == 16 and "i2v" in model.lower():
             i2v_condition_type = "token_replace"
+        elif in_channels == 16 and "custom" in model.lower():
+            i2v_condition_type = "reference"
         else:
             i2v_condition_type = "latent_concat"
         log.info(f"Condition type: {i2v_condition_type}")
@@ -380,166 +387,98 @@ class HyVideoModelLoader:
             comfy_model=comfy_model,
         )
 
-        if not "torchao" in quantization:
-            log.info("Using accelerate to load and assign model weights to device...")
-            if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast" or quantization == "fp8_scaled":
-                dtype = torch.float8_e4m3fn
-            elif quantization == "fp8_e5m2":
-                dtype = torch.float8_e5m2
-            else:
-                dtype = base_dtype
-            params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
-            for name, param in transformer.named_parameters():
-                #print("Assigning Parameter name: ", name)
-                dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else dtype
-                set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=sd[name])
+        log.info("Using accelerate to load and assign model weights to device...")
+        if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast" or quantization == "fp8_scaled":
+            fp8_scale_map = {}
+            if "fp8_scale" in sd:
+                for k, v in sd.items():
+                    if k.endswith(".fp8_scale"):
+                        fp8_scale_map[k] = v
+            dtype = torch.float8_e4m3fn
+        elif quantization == "fp8_e5m2":
+            dtype = torch.float8_e5m2
+        else:
+            dtype = base_dtype
+        params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
+        param_count = sum(1 for _ in transformer.named_parameters())
+        for name, param in tqdm(transformer.named_parameters(), 
+            desc=f"Loading transformer parameters to {transformer_load_device}", 
+            total=param_count,
+            leave=True):
+            dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else dtype
+            set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=sd[name])
 
-            comfy_model.diffusion_model = transformer
-            patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, offload_device)
-            pipe.comfy_model = patcher
+        comfy_model.diffusion_model = transformer
+        patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, offload_device)
+        pipe.comfy_model = patcher
 
-            del sd
-            gc.collect()
-            mm.soft_empty_cache()
+        del sd
+        gc.collect()
+        mm.soft_empty_cache()
 
-            if lora is not None:
-                from comfy.sd import load_lora_for_models
-                for l in lora:
-                    log.info(f"Loading LoRA: {l['name']} with strength: {l['strength']}")
-                    lora_path = l["path"]
-                    lora_strength = l["strength"]
-                    lora_sd = load_torch_file(lora_path, safe_load=True)
-                    lora_sd = standardize_lora_key_format(lora_sd)
-                    if l["blocks"]:
-                        lora_sd = filter_state_dict_by_blocks(lora_sd, l["blocks"])
-                    
-                    # patch in channels for keyframe LoRA
-                    if "diffusion_model.img_in.proj.lora_A.weight" in lora_sd:
-                        from .hyvideo.modules.embed_layers import PatchEmbed
-                        if lora_sd["diffusion_model.img_in.proj.lora_A.weight"].shape[1] != in_channels:
-                            log.info(f"Different in_channels {lora_sd['diffusion_model.img_in.proj.lora_A.weight'].shape[1]} vs {in_channels}, patching...")
-                            new_img_in = PatchEmbed(
-                                patch_size=patcher.model.diffusion_model.patch_size,
-                                in_chans=32,
-                                embed_dim=patcher.model.diffusion_model.hidden_size,
-                            ).to(patcher.model.diffusion_model.device, dtype=patcher.model.diffusion_model.dtype)
-                            new_img_in.proj.weight.zero_()
-                            new_img_in.proj.weight[:, :in_channels].copy_(patcher.model.diffusion_model.img_in.proj.weight)
+        if lora is not None:
+            from comfy.sd import load_lora_for_models
+            for l in lora:
+                log.info(f"Loading LoRA: {l['name']} with strength: {l['strength']}")
+                lora_path = l["path"]
+                lora_strength = l["strength"]
+                lora_sd = load_torch_file(lora_path, safe_load=True)
+                lora_sd = standardize_lora_key_format(lora_sd)
+                if l["blocks"]:
+                    lora_sd = filter_state_dict_by_blocks(lora_sd, l["blocks"])
+                
+                # patch in channels for keyframe LoRA
+                if "diffusion_model.img_in.proj.lora_A.weight" in lora_sd:
+                    from .hyvideo.modules.embed_layers import PatchEmbed
+                    if lora_sd["diffusion_model.img_in.proj.lora_A.weight"].shape[1] != in_channels:
+                        log.info(f"Different in_channels {lora_sd['diffusion_model.img_in.proj.lora_A.weight'].shape[1]} vs {in_channels}, patching...")
+                        new_img_in = PatchEmbed(
+                            patch_size=patcher.model.diffusion_model.patch_size,
+                            in_chans=32,
+                            embed_dim=patcher.model.diffusion_model.hidden_size,
+                        ).to(patcher.model.diffusion_model.device, dtype=patcher.model.diffusion_model.dtype)
+                        new_img_in.proj.weight.zero_()
+                        new_img_in.proj.weight[:, :in_channels].copy_(patcher.model.diffusion_model.img_in.proj.weight)
 
-                            if patcher.model.diffusion_model.img_in.proj.bias is not None:
-                                new_img_in.proj.bias.copy_(patcher.model.diffusion_model.img_in.proj.bias)
+                        if patcher.model.diffusion_model.img_in.proj.bias is not None:
+                            new_img_in.proj.bias.copy_(patcher.model.diffusion_model.img_in.proj.bias)
 
-                            patcher.model.diffusion_model.img_in = new_img_in
+                        patcher.model.diffusion_model.img_in = new_img_in
 
-                    patcher, _ = load_lora_for_models(patcher, None, lora_sd, lora_strength, 0)
+                patcher, _ = load_lora_for_models(patcher, None, lora_sd, lora_strength, 0)
 
-            comfy.model_management.load_models_gpu([patcher])
-            if load_device == "offload_device":
-                patcher.model.diffusion_model.to(offload_device)
+        comfy.model_management.load_models_gpu([patcher])
+        if load_device == "offload_device":
+            patcher.model.diffusion_model.to(offload_device)
 
-            if quantization == "fp8_e4m3fn_fast":
-                from .fp8_optimization import convert_fp8_linear
-                convert_fp8_linear(patcher.model.diffusion_model, base_dtype, params_to_keep=params_to_keep)
-            elif quantization == "fp8_scaled":
-                from .hyvideo.modules.fp8_optimization import convert_fp8_linear
-                convert_fp8_linear(patcher.model.diffusion_model, base_dtype)
+        if quantization == "fp8_e4m3fn_fast":
+            from .fp8_optimization import convert_fp8_linear
+            params_to_keep.update({"mlp", "modulation", "mod"})
+            convert_fp8_linear(patcher.model.diffusion_model, base_dtype, params_to_keep=params_to_keep)
+        elif quantization == "fp8_scaled":
+            from .hyvideo.modules.fp8_optimization import convert_fp8_linear
+            convert_fp8_linear(patcher.model.diffusion_model, base_dtype, device, fp8_scale_map=fp8_scale_map)
 
-            if auto_cpu_offload:
-                transformer.enable_auto_offload(dtype=dtype, device=device)
+        if auto_cpu_offload:
+            if quantization == "fp8_scaled":
+                raise ValueError("Auto CPU offload and fp8 scaled quantization are not compatible.")
+            transformer.enable_auto_offload(dtype=dtype, device=device)
 
-            #compile
-            if compile_args is not None:
-                torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
-                if compile_args["compile_single_blocks"]:
-                    for i, block in enumerate(patcher.model.diffusion_model.single_blocks):
-                        patcher.model.diffusion_model.single_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-                if compile_args["compile_double_blocks"]:
-                    for i, block in enumerate(patcher.model.diffusion_model.double_blocks):
-                        patcher.model.diffusion_model.double_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-                if compile_args["compile_txt_in"]:
-                    patcher.model.diffusion_model.txt_in = torch.compile(patcher.model.diffusion_model.txt_in, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-                if compile_args["compile_vector_in"]:
-                    patcher.model.diffusion_model.vector_in = torch.compile(patcher.model.diffusion_model.vector_in, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-                if compile_args["compile_final_layer"]:
-                    patcher.model.diffusion_model.final_layer = torch.compile(patcher.model.diffusion_model.final_layer, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-        elif "torchao" in quantization:
-            try:
-                from torchao.quantization import (
-                quantize_,
-                fpx_weight_only,
-                float8_dynamic_activation_float8_weight,
-                int8_dynamic_activation_int8_weight,
-                int8_weight_only,
-                int4_weight_only
-            )
-            except:
-                raise ImportError("torchao is not installed")
-
-            # def filter_fn(module: nn.Module, fqn: str) -> bool:
-            #     target_submodules = {'attn1', 'ff'} # avoid norm layers, 1.5 at least won't work with quantized norm1 #todo: test other models
-            #     if any(sub in fqn for sub in target_submodules):
-            #         return isinstance(module, nn.Linear)
-            #     return False
-
-            if "fp6" in quantization:
-                quant_func = fpx_weight_only(3, 2)
-            elif "int4" in quantization:
-                quant_func = int4_weight_only()
-            elif "int8" in quantization:
-                quant_func = int8_weight_only()
-            elif "fp8dq" in quantization:
-                quant_func = float8_dynamic_activation_float8_weight()
-            elif 'fp8dqrow' in quantization:
-                from torchao.quantization.quant_api import PerRow
-                quant_func = float8_dynamic_activation_float8_weight(granularity=PerRow())
-            elif 'int8dq' in quantization:
-                quant_func = int8_dynamic_activation_int8_weight()
-
-            log.info(f"Quantizing model with {quant_func}")
-            comfy_model.diffusion_model = transformer
-            patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, offload_device)
-
-            if lora is not None:
-                from comfy.sd import load_lora_for_models
-                for l in lora:
-                    lora_path = l["path"]
-                    lora_strength = l["strength"]
-                    lora_sd = load_torch_file(lora_path, safe_load=True)
-                    lora_sd = standardize_lora_key_format(lora_sd)
-                    patcher, _ = load_lora_for_models(patcher, None, lora_sd, lora_strength, 0)
-
-            comfy.model_management.load_models_gpu([patcher])
-
-            for i, block in enumerate(patcher.model.diffusion_model.single_blocks):
-                log.info(f"Quantizing single_block {i}")
-                for name, _ in block.named_parameters(prefix=f"single_blocks.{i}"):
-                    #print(f"Parameter name: {name}")
-                    set_module_tensor_to_device(patcher.model.diffusion_model, name, device=patcher.model.diffusion_model_load_device, dtype=base_dtype, value=sd[name])
-                if compile_args is not None:
+        #compile
+        if compile_args is not None:
+            torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
+            if compile_args["compile_single_blocks"]:
+                for i, block in enumerate(patcher.model.diffusion_model.single_blocks):
                     patcher.model.diffusion_model.single_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-                quantize_(block, quant_func)
-                print(block)
-                block.to(offload_device)
-            for i, block in enumerate(patcher.model.diffusion_model.double_blocks):
-                log.info(f"Quantizing double_block {i}")
-                for name, _ in block.named_parameters(prefix=f"double_blocks.{i}"):
-                    #print(f"Parameter name: {name}")
-                    set_module_tensor_to_device(patcher.model.diffusion_model, name, device=patcher.model.diffusion_model_load_device, dtype=base_dtype, value=sd[name])
-                if compile_args is not None:
+            if compile_args["compile_double_blocks"]:
+                for i, block in enumerate(patcher.model.diffusion_model.double_blocks):
                     patcher.model.diffusion_model.double_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-                quantize_(block, quant_func)
-            for name, param in patcher.model.diffusion_model.named_parameters():
-                if "single_blocks" not in name and "double_blocks" not in name:
-                    set_module_tensor_to_device(patcher.model.diffusion_model, name, device=patcher.model.diffusion_model_load_device, dtype=base_dtype, value=sd[name])
-
-            manual_offloading = False # to disable manual .to(device) calls
-            log.info(f"Quantized transformer blocks to {quantization}")
-            for name, param in patcher.model.diffusion_model.named_parameters():
-                print(name, param.dtype)
-                #param.data = param.data.to(self.vae_dtype).to(device)
-
-            del sd
-            mm.soft_empty_cache()
+            if compile_args["compile_txt_in"]:
+                patcher.model.diffusion_model.txt_in = torch.compile(patcher.model.diffusion_model.txt_in, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+            if compile_args["compile_vector_in"]:
+                patcher.model.diffusion_model.vector_in = torch.compile(patcher.model.diffusion_model.vector_in, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+            if compile_args["compile_final_layer"]:
+                patcher.model.diffusion_model.final_layer = torch.compile(patcher.model.diffusion_model.final_layer, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
 
         patcher.model["pipe"] = pipe
         patcher.model["dtype"] = base_dtype
@@ -661,10 +600,14 @@ class HyVideoTextEmbedBridge:
     def INPUT_TYPES(s):
         return {"required": {
             "positive": ("CONDITIONING", ),
+            "cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.01, "tooltip": "guidance scale"} ),
+            "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percentage of the steps to apply CFG, rest of the steps use guidance_embeds"} ),
+            "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percentage of the steps to apply CFG, rest of the steps use guidance_embeds"} ),
+            "batched_cfg": ("BOOLEAN", {"default": False, "tooltip": "Calculate cond and uncond as a batch, increases memory usage but can be faster"}),
+            "use_cfg_zero_star": ("BOOLEAN", {"default": True, "tooltip": "Use CFG zero star"}),
             },
             "optional": {
                 "negative": ("CONDITIONING", ),
-                "hyvid_cfg": ("HYVID_CFG", {"tooltip": "The prompt from the cfg node is not used, only the settings"}),
             }
         }
     RETURN_TYPES = ("HYVIDEMBEDS",)
@@ -673,7 +616,7 @@ class HyVideoTextEmbedBridge:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Acts as a bridge between the native ComfyUI conditioning and the HunyuanVideoWrapper embeds"
 
-    def convert(self, positive, negative=None, hyvid_cfg=None): 
+    def convert(self, positive, cfg, start_percent, end_percent, batched_cfg, use_cfg_zero_star, negative=None): 
         positive_cond = positive[0][0]
         positive_pooled = positive[0][1]["pooled_output"]
         positive_attention_mask = torch.ones(positive_cond.shape[1], dtype=torch.bool, device=positive_cond.device).unsqueeze(0)
@@ -689,10 +632,11 @@ class HyVideoTextEmbedBridge:
                 "negative_attention_mask": negative_attention_mask,
                 "prompt_embeds_2": positive_pooled,
                 "negative_prompt_embeds_2": negative_pooled,
-                "cfg": torch.tensor(hyvid_cfg["cfg"]) if hyvid_cfg is not None else None,
-                "start_percent": torch.tensor(hyvid_cfg["start_percent"]) if hyvid_cfg is not None else None,
-                "end_percent": torch.tensor(hyvid_cfg["end_percent"]) if hyvid_cfg is not None else None,
-                "batched_cfg": torch.tensor(hyvid_cfg["batched_cfg"]) if hyvid_cfg is not None else None,
+                "cfg": torch.tensor(cfg),
+                "start_percent": torch.tensor(start_percent),
+                "end_percent": torch.tensor(end_percent),
+                "batched_cfg": torch.tensor(batched_cfg),
+                "use_cfg_zero_star": torch.tensor(use_cfg_zero_star),
             }
         return (prompt_embeds_dict,)
 
@@ -857,6 +801,7 @@ class HyVideoTextEncode:
                 "custom_prompt_template": ("PROMPT_TEMPLATE", {"default": PROMPT_TEMPLATE["dit-llm-encode-video"], "multiline": True}),
                 "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
                 "hyvid_cfg": ("HYVID_CFG", ),
+                "model_to_offload": ("HYVIDEOMODEL", {"tooltip": "If connected, moves the video model to the offload device"}),
             }
         }
 
@@ -866,11 +811,15 @@ class HyVideoTextEncode:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", 
-                hyvid_cfg=None, image=None, image1=None, image2=None, clip_text_override=None, image_embed_interleave=2):
+                hyvid_cfg=None, image=None, image1=None, image2=None, clip_text_override=None, image_embed_interleave=2, model_to_offload=None):
         if clip_text_override is not None and len(clip_text_override) == 0:
             clip_text_override = None
         device = mm.text_encoder_device()
         offload_device = mm.text_encoder_offload_device()
+
+        if model_to_offload is not None:
+            log.info(f"Moving video model to {offload_device}...")
+            model_to_offload.model.to(offload_device)
 
         text_encoder_1 = text_encoders["text_encoder"]
         if clip_l is None:
@@ -1098,6 +1047,7 @@ class HyVideoTextImageEncode(HyVideoTextEncode):
                 "image2": ("IMAGE", {"default": None}),
                 "clip_text_override": ("STRING", {"default": "", "multiline": True} ),
                 "hyvid_cfg": ("HYVID_CFG", ),
+                "model_to_offload": ("HYVIDEOMODEL", {"tooltip": "Model to move to offload_device before encoding"}),
             }
         }
 
@@ -1120,6 +1070,7 @@ class HyVideoI2VEncode(HyVideoTextEncode):
                 "image": ("IMAGE", {"default": None}),
                 "hyvid_cfg": ("HYVID_CFG", ),
                 "image_embed_interleave": ("INT", {"default": 2}),
+                "model_to_offload": ("HYVIDEOMODEL", {"tooltip": "Model to move to offload_device before encoding"}),
             }
         }
 
@@ -1137,7 +1088,8 @@ class HyVideoCFG:
             "cfg": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 100.0, "step": 0.01, "tooltip": "guidance scale"} ),
             "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percentage of the steps to apply CFG, rest of the steps use guidance_embeds"} ),
             "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percentage of the steps to apply CFG, rest of the steps use guidance_embeds"} ),
-            "batched_cfg": ("BOOLEAN", {"default": True, "tooltip": "Calculate cond and uncond as a batch, increases memory usage but can be faster"}),
+            "batched_cfg": ("BOOLEAN", {"default": False, "tooltip": "Calculate cond and uncond as a batch, increases memory usage but can be faster"}),
+            "use_cfg_zero_star": ("BOOLEAN", {"default": False, "tooltip": "Use CFG zero star"}),
             },
         }
 
@@ -1147,13 +1099,14 @@ class HyVideoCFG:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "To use CFG with HunyuanVideo"
 
-    def process(self, negative_prompt, cfg, start_percent, end_percent, batched_cfg):
+    def process(self, negative_prompt, cfg, start_percent, end_percent, batched_cfg, use_cfg_zero_star):
         cfg_dict = {
             "negative_prompt": negative_prompt,
             "cfg": cfg,
             "start_percent": start_percent,
             "end_percent": end_percent,
-            "batched_cfg": batched_cfg
+            "batched_cfg": batched_cfg,
+            "use_cfg_zero_start": use_cfg_zero_star,
         }
         
         return (cfg_dict,)
@@ -1232,6 +1185,7 @@ class HyVideoTextEmbedsLoad:
             "start_percent": loaded_tensors.get("start_percent", None),
             "end_percent": loaded_tensors.get("end_percent", None),
             "batched_cfg": loaded_tensors.get("batched_cfg", None),
+            "use_cfg_zero_star": loaded_tensors.get("use_cfg_zero_star", None),
         }
         
         return (prompt_embeds_dict,)
@@ -1264,6 +1218,75 @@ class HyVideoContextOptions:
         }
 
         return (context_options,)
+
+class HyVideoLoopArgs:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                "shift_skip": ("INT", {"default": 6, "min": 0, "tooltip": "Skip step of latent shift"}),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percent of the looping effect"}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percent of the looping effect"}),
+            },
+        }
+
+    RETURN_TYPES = ("LOOPARGS", )
+    RETURN_NAMES = ("loop_args",)
+    FUNCTION = "process"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "Looping through latent shift as shown in https://github.com/YisuiTT/Mobius/"
+
+    def process(self, **kwargs):
+        return (kwargs,)
+    
+class HunyuanVideoFresca:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                "fresca_scale_low": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "fresca_scale_high": ("FLOAT", {"default": 1.25, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "fresca_freq_cutoff": ("INT", {"default": 20, "min": 0, "max": 10000, "step": 1}),
+            },
+        }
+
+    RETURN_TYPES = ("FRESCA_ARGS", )
+    RETURN_NAMES = ("fresca_args",)
+    FUNCTION = "process"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "https://github.com/WikiChao/FreSca"
+
+    def process(self, **kwargs):
+        return (kwargs,)
+
+class HunyuanVideoSLG:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "double_blocks": ("STRING", {"default": "", "tooltip": "Blocks to skip uncond on, separated by comma, index starts from 0"}),
+            "single_blocks": ("STRING", {"default": "20", "tooltip": "Blocks to skip uncond on, separated by comma, index starts from 0"}),
+            "start_percent": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percent of SLG signal"}),
+            "end_percent": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percent of SLG signal"}),
+            },
+        }
+
+    RETURN_TYPES = ("SLGARGS", )
+    RETURN_NAMES = ("slg_args",)
+    FUNCTION = "process"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "Skips uncond on the selected blocks"
+
+    def process(self, double_blocks, single_blocks, start_percent, end_percent):
+
+        slg_double_block_list = [int(x.strip()) for x in double_blocks.split(",")] if double_blocks else None
+        slg_single_block_list = [int(x.strip()) for x in single_blocks.split(",")] if single_blocks else None
+       
+        slg_args = {
+            "double_blocks": slg_double_block_list,
+            "single_blocks": slg_single_block_list,
+            "start_percent": start_percent,
+            "end_percent": end_percent,
+        }
+        return (slg_args,)
+    
 #region Sampler
 class HyVideoSampler:
     @classmethod
@@ -1285,6 +1308,7 @@ class HyVideoSampler:
             "optional": {
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
                 "image_cond_latents": ("LATENT", {"tooltip": "init Latents to use for image2video process"} ),
+                #"neg_image_cond_latents": ("LATENT", {"tooltip": "init Latents to use for image2video process"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "stg_args": ("STGARGS", ),
                 "context_options": ("HYVIDCONTEXT", ),
@@ -1296,6 +1320,10 @@ class HyVideoSampler:
                     }),
                 "riflex_freq_index": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Frequency index for RIFLEX, disabled when 0, default 4. Allows for new frames to be generated after 129 without looping"}),
                 "i2v_mode": (["stability", "dynamic"], {"default": "dynamic", "tooltip": "I2V mode for image2video process"}),
+                "loop_args": ("LOOPARGS", ),
+                "fresca_args": ("FRESCA_ARGS", ),
+                "slg_args": ("SLGARGS", ),
+                "mask": ("MASK", ),
             }
         }
 
@@ -1306,7 +1334,7 @@ class HyVideoSampler:
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
                 samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, 
-                teacache_args=None, scheduler=None, image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability"):
+                teacache_args=None, scheduler=None, image_cond_latents=None, neg_image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability", loop_args=None, fresca_args=None, slg_args=None, mask=None):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1329,11 +1357,13 @@ class HyVideoSampler:
             cfg_start_percent = float(hyvid_embeds.get("start_percent", 0.0))
             cfg_end_percent = float(hyvid_embeds.get("end_percent", 1.0))
             batched_cfg = hyvid_embeds.get("batched_cfg", True)
+            use_cfg_zero_star = hyvid_embeds.get("use_cfg_zero_star", True)
         else:
             cfg = 1.0
             cfg_start_percent = 0.0
             cfg_end_percent = 1.0
             batched_cfg = False
+            use_cfg_zero_star = False
         
         if embedded_guidance_scale == 0.0:
             embedded_guidance_scale = None
@@ -1394,24 +1424,21 @@ class HyVideoSampler:
 
         # Initialize TeaCache if enabled
         if teacache_args is not None:
-            # Check if dimensions have changed since last run
-            if (not hasattr(transformer, 'last_dimensions') or
-                    transformer.last_dimensions != (height, width, num_frames) or
-                    not hasattr(transformer, 'last_frame_count') or
-                    transformer.last_frame_count != num_frames):
-                # Reset TeaCache state on dimension change
-                transformer.cnt = 0
-                transformer.teacache_skipped_steps = 0
-                transformer.accumulated_rel_l1_distance = 0
-                transformer.previous_modulated_input = None
-                transformer.previous_residual = None
-                transformer.last_dimensions = (height, width, num_frames)
-                transformer.last_frame_count = num_frames
-                transformer.teacache_device = device
-
             transformer.enable_teacache = True
+            transformer.cnt = 0
+            transformer.accumulated_rel_l1_distance = 0
+            transformer.teacache_skipped_steps_cond = transformer.teacache_skipped_steps_uncond =0
+            transformer.previous_modulated_input_cond = transformer.previous_modulated_input_uncond = None
+            transformer.previous_residual_cond = transformer.previous_residual_uncond = None
+            transformer.accumulated_rel_l1_distance_cond = transformer.accumulated_rel_l1_distance_uncond = 0
+            transformer.teacache_device = device
             transformer.num_steps = steps
             transformer.rel_l1_thresh = teacache_args["rel_l1_thresh"]
+            transformer.teacache_start_step = teacache_args["start_step"]
+            teacache_end_step = teacache_args["end_step"]
+            if teacache_end_step < 0:
+                teacache_end_step = steps - 1
+            transformer.teacache_end_step = teacache_end_step
         else:
             transformer.enable_teacache = False
 
@@ -1435,6 +1462,24 @@ class HyVideoSampler:
             if denoise_strength < 1.0:
                 input_latents *= VAE_SCALING_FACTOR
 
+        mask_latents = None
+        if mask is not None:
+            from einops import rearrange
+            target_video_length = mask.shape[0]
+            target_height = mask.shape[1]
+            target_width = mask.shape[2]
+
+            mask_length = (target_video_length - 1) // 4 + 1
+            mask_height = target_height // 8
+            mask_width = target_width // 8
+
+            mask = mask.unsqueeze(-1).unsqueeze(0)
+            mask = rearrange(mask, "b t h w c -> b c t h w")
+            print("mask shape", mask.shape)
+            
+            mask_latents = torch.nn.functional.interpolate(mask, size=(mask_length, mask_height, mask_width))
+            mask_latents = mask_latents.to(device)
+
         out_latents = model["pipe"](
             num_inference_steps=steps,
             height = target_height,
@@ -1444,8 +1489,12 @@ class HyVideoSampler:
             cfg_start_percent=cfg_start_percent,
             cfg_end_percent=cfg_end_percent,
             batched_cfg=batched_cfg,
+            use_cfg_zero_star=use_cfg_zero_star,
+            fresca_args=fresca_args,
+            slg_args=slg_args,
             embedded_guidance_scale=embedded_guidance_scale,
             latents=input_latents,
+            mask_latents=mask_latents,
             denoise_strength=denoise_strength,
             prompt_embed_dict=hyvid_embeds,
             generator=generator,
@@ -1458,8 +1507,10 @@ class HyVideoSampler:
             feta_args=feta_args,
             leapfusion_img2vid = leapfusion_img2vid,
             image_cond_latents = image_cond_latents["samples"] * VAE_SCALING_FACTOR if image_cond_latents is not None else None,
+            neg_image_cond_latents = neg_image_cond_latents["samples"] * VAE_SCALING_FACTOR if neg_image_cond_latents is not None else None,
             riflex_freq_index = riflex_freq_index,
             i2v_stability = i2v_stability,
+            loop_args = loop_args,
         )
 
         print_memory(device)
@@ -1469,8 +1520,10 @@ class HyVideoSampler:
             pass
 
         if teacache_args is not None:
-            log.info(f"TeaCache skipped {transformer.teacache_skipped_steps} steps")
-            transformer.teacache_skipped_steps = 0
+        
+            log.info(f"TeaCache skipped {transformer.teacache_skipped_steps_cond} cond steps")
+            if transformer.teacache_skipped_steps_uncond > 0:
+                log.info(f"TeaCache skipped {transformer.teacache_skipped_steps_uncond} uncond steps")
 
         if force_offload:
             if model["manual_offloading"]:
@@ -1877,6 +1930,9 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoI2VEncode": HyVideoI2VEncode,
     "HyVideoEncodeKeyframes": HyVideoEncodeKeyframes,
     "HyVideoTextEmbedBridge": HyVideoTextEmbedBridge,
+    "HyVideoLoopArgs": HyVideoLoopArgs,
+    "HunyuanVideoFresca": HunyuanVideoFresca,
+    "HunyuanVideoSLG": HunyuanVideoSLG
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1904,4 +1960,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoI2VEncode": "HyVideo I2V Encode",
     "HyVideoEncodeKeyframes": "HyVideo Encode Keyframes",
     "HyVideoTextEmbedBridge": "HyVideo TextEmbed Bridge",
+    "HyVideoLoopArgs": "HyVideo Loop Args",
+    "HunyuanVideoFresca": "HunyuanVideo Fresca",
+    "HunyuanVideoSLG": "HunyuanVideo SLG",
     }
