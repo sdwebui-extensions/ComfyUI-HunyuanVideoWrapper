@@ -31,7 +31,6 @@ from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.schedulers import DPMSolverMultistepScheduler
 
-from ...modules import HYVideoDiffusionTransformer
 from comfy.utils import ProgressBar
 import math
 from ....utils import optimized_scale, fourier_filter
@@ -170,7 +169,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
 
     def __init__(
         self,
-        transformer: HYVideoDiffusionTransformer,
+        transformer,
         scheduler: KarrasDiffusionSchedulers,
         comfy_model = None,
         progress_bar_config: Dict[str, Any] = None,

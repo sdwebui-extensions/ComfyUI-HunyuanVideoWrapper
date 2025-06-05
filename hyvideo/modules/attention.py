@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 try:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
-except ImportError:
+except:
     flash_attn_varlen_func = None
 
 try:
@@ -34,7 +34,7 @@ try:
     @torch.compiler.disable()
     def sageattn_func(q, k, v, attn_mask=None, dropout_p=0, is_causal=False):
         return sageattn(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
-except ImportError:
+except:
     sageattn_varlen_func = None
 
 from comfy.ldm.modules.attention import optimized_attention
